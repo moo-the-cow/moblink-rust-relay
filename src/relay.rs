@@ -445,7 +445,7 @@ async fn handle_start_tunnel_request(
     info!(
         "Bound destination socket to: {:?}",
         destination_socket.local_addr()?
-    ); // Added logging
+    );
     let destination_socket = Arc::new(tokio::net::UdpSocket::from_std(destination_socket)?);
 
     let destination_socket_clone = destination_socket.clone();
@@ -470,9 +470,9 @@ async fn handle_start_tunnel_request(
     let relay_to_destination: tokio::task::JoinHandle<()> = {
         let server_remote_addr_clone = server_remote_addr.clone();
         tokio::spawn(async move {
-            let mut buf = [0; 2048];
             debug!("(relay_to_destination) Task started");
             loop {
+                let mut buf = [0; 2048];
                 let (size, remote_addr) = match tokio::time::timeout(
                     Duration::from_secs(5),
                     streamer_socket_clone.recv_from(&mut buf),
@@ -538,9 +538,9 @@ async fn handle_start_tunnel_request(
     let relay_to_streamer = {
         let server_remote_addr_clone = server_remote_addr.clone();
         tokio::spawn(async move {
-            let mut buf = [0; 2048];
             debug!("(relay_to_streamer) Task started");
             loop {
+                let mut buf = [0; 2048];
                 let (size, remote_addr) = match tokio::time::timeout(
                     Duration::from_secs(5),
                     destination_socket.recv_from(&mut buf),
