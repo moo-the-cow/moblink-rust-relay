@@ -11,9 +11,9 @@ use tokio::sync::Mutex;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Relay ID
-    #[arg(short = 'i', long)]
-    relay_id: String,
+    /// Name to identify the relay
+    #[arg(short, long, default_value = "Relay")]
+    name: String,
 
     /// Streamer URL (websocket)
     #[arg(short = 'u', long)]
@@ -22,10 +22,6 @@ struct Args {
     /// Password
     #[arg(short, long)]
     password: String,
-
-    /// Name to identify the relay
-    #[arg(short, long, default_value = "Relay")]
-    name: String,
 
     /// Log level
     #[arg(short, long, default_value = "info")]
@@ -46,7 +42,6 @@ async fn main() {
         let mut relay_lock = relay.lock().await;
         relay_lock
             .setup(
-                args.relay_id,
                 args.streamer_url,
                 args.password,
                 args.name,

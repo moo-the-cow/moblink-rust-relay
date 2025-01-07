@@ -14,6 +14,7 @@ use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{
     connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
 };
+use uuid;
 
 pub struct Relay {
     relay_id: String,
@@ -45,9 +46,12 @@ impl Relay {
         }
     }
 
+    pub fn generate_relay_id(&self) -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
     pub async fn setup<F, G>(
         &mut self,
-        relay_id: String,
         streamer_url: String,
         password: String,
         name: String,
@@ -59,7 +63,7 @@ impl Relay {
     {
         self.on_status_updated = Some(Box::new(on_status_updated));
         self.get_battery_percentage = Some(Arc::new(get_battery_percentage));
-        self.relay_id = relay_id;
+        self.relay_id = self.generate_relay_id();
         self.streamer_url = streamer_url;
         self.password = password;
         self.name = name;
@@ -296,6 +300,7 @@ impl Relay {
             locked_ws_in.send(Message::Text(text)).await?;
             Ok(())
         } else if let Some(identified) = message.identified {
+            info!("Received identified message: {:?}", identified);
             let mut relay = relay_arc.lock().await;
             if identified.result.ok.is_some() {
                 relay.connected = true;
