@@ -90,6 +90,8 @@ pub struct MessageToClient {
 
 #[derive(Serialize, Debug)]
 pub struct MessageToServer {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub identify: Option<Identify>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<MessageResponse>,
 }
