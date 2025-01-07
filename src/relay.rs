@@ -456,7 +456,7 @@ async fn handle_start_tunnel_request(
 
     // Relay packets from streamer to destination.
     let relay_to_destination = tokio::spawn(async move {
-        let mut buf = [0; 4096]; // Increased buffer size
+        let mut buf = [0; 2048];
         loop {
             let (size, remote_addr) = match tokio::time::timeout(
                 Duration::from_secs(5),
@@ -511,7 +511,7 @@ async fn handle_start_tunnel_request(
 
     // Relay packets from destination to streamer.
     let relay_to_streamer = tokio::spawn(async move {
-        let mut buf = [0; 4096]; // Increased buffer size
+        let mut buf = [0; 2048];
         loop {
             let (size, remote_addr) = match tokio::time::timeout(
                 Duration::from_secs(5),
