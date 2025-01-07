@@ -3,7 +3,7 @@ use base64::{engine::general_purpose, Engine as _};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use log::{debug, error, info};
 use sha2::{Digest, Sha256};
-use std::net::{ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{
@@ -448,9 +448,12 @@ async fn handle_start_tunnel_request(
 
     info!("Destination address resolved: {}", destination_addr); // Added logging
 
+    let mut server_remote_addr: Option<SocketAddr> = None;
+
     // Relay packets from streamer to destination.
     let relay_to_destination = tokio::spawn(async move {
         let mut buf = [0; 2048];
+        debug!("(relay_to_destination) Task started");
         loop {
             let (size, remote_addr) = match tokio::time::timeout(
                 Duration::from_secs(5),
@@ -499,11 +502,26 @@ async fn handle_start_tunnel_request(
                     break;
                 }
             }
-            // Relay packets from destination to streamer.
-            let mut buf = [0; 2048];
+            // Check if this is the first packet and set the remote address
+            if server_remote_addr.is_none() {
+                server_remote_addr = Some(remote_addr);
+                debug!(
+                    "(relay_to_destination) Server remote address set to: {}",
+                    remote_addr
+                );
+            }
+        }
+        info!("(relay_to_destination) Task exiting");
+    });
+
+    // Relay packets from destination to streamer.
+    let relay_to_streamer = tokio::spawn(async move {
+        let mut buf = [0; 2048];
+        debug!("(relay_to_streamer) Task started");
+        loop {
             let (size, remote_addr) = match tokio::time::timeout(
                 Duration::from_secs(5),
-                destination_socket_clone.recv_from(&mut buf),
+                destination_socket.recv_from(&mut buf),
             )
             .await
             {
@@ -533,24 +551,39 @@ async fn handle_start_tunnel_request(
                 size, remote_addr
             );
             // Forward to server.
-            match streamer_socket_clone
-                .send_to(&buf[..size], &remote_addr)
-                .await
-            {
-                Ok(bytes_sent) => debug!("(relay_to_streamer) Sent {} bytes to server", bytes_sent),
-                Err(e) => {
-                    error!("(relay_to_streamer) Failed to send to server: {}", e);
-                    break;
+            match server_remote_addr {
+                Some(server_addr) => {
+                    match streamer_socket.send_to(&buf[..size], &server_addr).await {
+                        Ok(bytes_sent) => {
+                            debug!("(relay_to_streamer) Sent {} bytes to server", bytes_sent)
+                        }
+                        Err(e) => {
+                            error!("(relay_to_streamer) Failed to send to server: {}", e);
+                            break;
+                        }
+                    }
+                }
+                None => {
+                    error!("(relay_to_streamer) Server address not set, cannot forward packet");
                 }
             }
         }
-        info!("(relay_to_destination) Task exiting");
+        info!("(relay_to_streamer) Task exiting");
     });
 
     // Wait for relay tasks to complete (they won't unless an error occurs or the socket is closed).
-    relay_to_destination
-        .await
-        .expect("relay_to_destination panicked");
+    tokio::select! {
+        res = relay_to_destination => {
+            if let Err(e) = res {
+                error!("relay_to_destination task failed: {}", e);
+            }
+        }
+        res = relay_to_streamer => {
+            if let Err(e) = res {
+                error!("relay_to_streamer task failed: {}", e);
+            }
+        }
+    }
 
     Ok(())
 }
