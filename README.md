@@ -48,7 +48,7 @@ cargo build --release
 
 ### Multiple Bind Addresses
 
-If you provide **two or more** `--bind-address` arguments:
+If you provide **two or less** `--bind-address` arguments:
 
 - The **first** address is used for the streamer-facing UDP socket.  
 - The **second** address is used for the destination-facing UDP socket.  
