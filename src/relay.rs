@@ -433,70 +433,127 @@ async fn handle_start_tunnel_request(
 
     // Create a new UDP socket for communication with the destination.
     let destination_socket = UdpSocket::bind("0.0.0.0:0")?;
-    let destination_socket = Arc::new(tokio::net::UdpSocket::from_std(destination_socket)?);
     info!(
-        "Bound local socket to {:?}",
-        destination_socket.local_addr()
-    );
+        "Bound destination socket to: {:?}",
+        destination_socket.local_addr()?
+    ); // Added logging
+    let destination_socket = Arc::new(tokio::net::UdpSocket::from_std(destination_socket)?);
 
     let destination_socket_clone = destination_socket.clone();
     let streamer_socket_clone = streamer_socket.clone();
     let destination_addr = format!("{}:{}", destination_ip, destination_port)
         .to_socket_addrs()?
         .next()
-        .ok_or("Failed to resolve destination address")?;
+        .ok_or_else(|| {
+            error!(
+                "Failed to resolve destination address: {}:{}",
+                destination_ip, destination_port
+            );
+            "Failed to resolve destination address"
+        })?;
+
+    info!("Destination address resolved: {}", destination_addr); // Added logging
 
     // Relay packets from streamer to destination.
     let relay_to_destination = tokio::spawn(async move {
-        let mut buf = [0; 2048];
+        let mut buf = [0; 4096]; // Increased buffer size
         loop {
-            match streamer_socket_clone.recv_from(&mut buf).await {
-                Ok((size, _remote_addr)) => {
-                    debug!("Received {} bytes from server", size);
-                    // Forward to destination.
-                    match destination_socket_clone
-                        .send_to(&buf[..size], &destination_addr)
-                        .await
-                    {
-                        Ok(bytes_sent) => {
-                            debug!("Sent {} bytes to destination", bytes_sent)
-                        }
+            let (size, remote_addr) = match tokio::time::timeout(
+                Duration::from_secs(5),
+                streamer_socket_clone.recv_from(&mut buf),
+            )
+            .await
+            {
+                Ok(result) => {
+                    match result {
+                        Ok((size, addr)) => (size, addr),
                         Err(e) => {
-                            error!("Failed to send to destination: {}", e);
-                            break;
+                            error!("(relay_to_destination) Error receiving from server: {}", e);
+                            continue; // Continue to the next iteration after error
                         }
                     }
                 }
                 Err(e) => {
-                    error!("Failed to receive from server: {}", e);
+                    error!(
+                        "(relay_to_destination) Timeout receiving from server: {}",
+                        e
+                    );
+                    continue; // Continue to the next iteration after timeout
+                }
+            };
+
+            debug!(
+                "(relay_to_destination) Received {} bytes from server: {}",
+                size, remote_addr
+            );
+            // Forward to destination.
+            match destination_socket_clone
+                .send_to(&buf[..size], &destination_addr)
+                .await
+            {
+                Ok(bytes_sent) => {
+                    debug!(
+                        "(relay_to_destination) Sent {} bytes to destination",
+                        bytes_sent
+                    )
+                }
+                Err(e) => {
+                    error!(
+                        "(relay_to_destination) Failed to send to destination: {}",
+                        e
+                    );
                     break;
                 }
             }
         }
+        info!("(relay_to_destination) Task exiting");
     });
 
     // Relay packets from destination to streamer.
     let relay_to_streamer = tokio::spawn(async move {
-        let mut buf = [0; 2048];
+        let mut buf = [0; 4096]; // Increased buffer size
         loop {
-            match destination_socket.recv_from(&mut buf).await {
-                Ok((size, remote_addr)) => {
-                    debug!("Received {} bytes from destination", size);
-                    // Forward to server.
-                    match streamer_socket.send_to(&buf[..size], &remote_addr).await {
-                        Ok(bytes_sent) => debug!("Sent {} bytes to server", bytes_sent),
+            let (size, remote_addr) = match tokio::time::timeout(
+                Duration::from_secs(5),
+                destination_socket.recv_from(&mut buf),
+            )
+            .await
+            {
+                Ok(result) => {
+                    match result {
+                        Ok((size, addr)) => (size, addr),
                         Err(e) => {
-                            error!("Failed to send to server: {}", e);
-                            break;
+                            error!(
+                                "(relay_to_streamer) Error receiving from destination: {}",
+                                e
+                            );
+                            continue; // Continue to the next iteration after error
                         }
                     }
                 }
                 Err(e) => {
-                    error!("Failed to receive from destination: {}", e);
+                    error!(
+                        "(relay_to_streamer) Timeout receiving from destination: {}",
+                        e
+                    );
+                    continue; // Continue to the next iteration after timeout
+                }
+            };
+
+            debug!(
+                "(relay_to_streamer) Received {} bytes from destination: {}",
+                size, remote_addr
+            );
+            // Forward to server.
+            match streamer_socket.send_to(&buf[..size], &remote_addr).await {
+                Ok(bytes_sent) => debug!("(relay_to_streamer) Sent {} bytes to server", bytes_sent),
+                Err(e) => {
+                    error!("(relay_to_streamer) Failed to send to server: {}", e);
                     break;
                 }
             }
         }
+        info!("(relay_to_streamer) Task exiting");
     });
 
     // Wait for relay tasks to complete (they won't unless an error occurs or the socket is closed).
