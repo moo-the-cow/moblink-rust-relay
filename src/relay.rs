@@ -350,17 +350,24 @@ impl Relay {
                             identify: None,
                             response: Some(response),
                         };
-                        let text = serde_json::to_string(&message).unwrap(); // Consider handling this error properly
+                        let text = serde_json::to_string(&message);
 
-                        log::info!("Sending status response: {}", text);
-                        let cloned_ws_in = ws_in.clone();
-                        tokio::spawn(async move {
-                            let mut locked_ws_in = cloned_ws_in.lock().await;
-                            match locked_ws_in.send(Message::Text(text)).await {
-                                Ok(_) => info!("Status response sent successfully."),
-                                Err(e) => error!("Failed to send status response: {}", e),
-                            }
-                        });
+                        if let Err(e) = text {
+                            error!("Failed to serialize status response: {}", e);
+                            return;
+                        }
+
+                        if let Ok(text) = text {
+                            log::info!("Sending status response: {}", text);
+                            let cloned_ws_in = ws_in.clone();
+                            tokio::spawn(async move {
+                                let mut locked_ws_in = cloned_ws_in.lock().await;
+                                match locked_ws_in.send(Message::Text(text)).await {
+                                    Ok(_) => info!("Status response sent successfully."),
+                                    Err(e) => error!("Failed to send status response: {}", e),
+                                }
+                            });
+                        }
                     }));
                     Ok(())
                 } else {
