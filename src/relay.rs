@@ -463,128 +463,137 @@ async fn handle_start_tunnel_request(
 
     info!("Destination address resolved: {}", destination_addr); // Added logging
 
-    let mut server_remote_addr: Option<SocketAddr> = None;
+    // Use an Arc<Mutex> to share the server_remote_addr between tasks.
+    let server_remote_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
     // Relay packets from streamer to destination.
-    let relay_to_destination = tokio::spawn(async move {
-        let mut buf = [0; 2048];
-        debug!("(relay_to_destination) Task started");
-        loop {
-            let (size, remote_addr) = match tokio::time::timeout(
-                Duration::from_secs(5),
-                streamer_socket_clone.recv_from(&mut buf),
-            )
-            .await
-            {
-                Ok(result) => {
-                    match result {
-                        Ok((size, addr)) => (size, addr),
-                        Err(e) => {
-                            error!("(relay_to_destination) Error receiving from server: {}", e);
-                            continue; // Continue to the next iteration after error
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "(relay_to_destination) Timeout receiving from server: {}",
-                        e
-                    );
-                    continue; // Continue to the next iteration after timeout
-                }
-            };
-
-            debug!(
-                "(relay_to_destination) Received {} bytes from server: {}",
-                size, remote_addr
-            );
-            // Forward to destination.
-            match destination_socket_clone
-                .send_to(&buf[..size], &destination_addr)
+    let relay_to_destination: tokio::task::JoinHandle<()> = {
+        let server_remote_addr_clone = server_remote_addr.clone();
+        tokio::spawn(async move {
+            let mut buf = [0; 2048];
+            debug!("(relay_to_destination) Task started");
+            loop {
+                let (size, remote_addr) = match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    streamer_socket_clone.recv_from(&mut buf),
+                )
                 .await
-            {
-                Ok(bytes_sent) => {
-                    debug!(
-                        "(relay_to_destination) Sent {} bytes to destination",
-                        bytes_sent
-                    )
-                }
-                Err(e) => {
-                    error!(
-                        "(relay_to_destination) Failed to send to destination: {}",
-                        e
-                    );
-                    break;
-                }
-            }
-            // Check if this is the first packet and set the remote address
-            if server_remote_addr.is_none() {
-                server_remote_addr = Some(remote_addr);
+                {
+                    Ok(result) => {
+                        match result {
+                            Ok((size, addr)) => (size, addr),
+                            Err(e) => {
+                                error!("(relay_to_destination) Error receiving from server: {}", e);
+                                continue; // Continue to the next iteration after error
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "(relay_to_destination) Timeout receiving from server: {}",
+                            e
+                        );
+                        continue; // Continue to the next iteration after timeout
+                    }
+                };
+
                 debug!(
-                    "(relay_to_destination) Server remote address set to: {}",
-                    remote_addr
+                    "(relay_to_destination) Received {} bytes from server: {}",
+                    size, remote_addr
                 );
-            }
-        }
-        info!("(relay_to_destination) Task exiting");
-    });
-
-    // Relay packets from destination to streamer.
-    let relay_to_streamer = tokio::spawn(async move {
-        let mut buf = [0; 2048];
-        debug!("(relay_to_streamer) Task started");
-        loop {
-            let (size, remote_addr) = match tokio::time::timeout(
-                Duration::from_secs(5),
-                destination_socket.recv_from(&mut buf),
-            )
-            .await
-            {
-                Ok(result) => {
-                    match result {
-                        Ok((size, addr)) => (size, addr),
-                        Err(e) => {
-                            error!(
-                                "(relay_to_streamer) Error receiving from destination: {}",
-                                e
-                            );
-                            continue; // Continue to the next iteration after error
-                        }
+                // Forward to destination.
+                match destination_socket_clone
+                    .send_to(&buf[..size], &destination_addr)
+                    .await
+                {
+                    Ok(bytes_sent) => {
+                        debug!(
+                            "(relay_to_destination) Sent {} bytes to destination",
+                            bytes_sent
+                        )
+                    }
+                    Err(e) => {
+                        error!(
+                            "(relay_to_destination) Failed to send to destination: {}",
+                            e
+                        );
+                        break;
                     }
                 }
-                Err(e) => {
-                    error!(
-                        "(relay_to_streamer) Timeout receiving from destination: {}",
-                        e
+
+                // Set the remote address if it hasn't been set yet.
+                let mut server_remote_addr_lock = server_remote_addr_clone.lock().await;
+                if server_remote_addr_lock.is_none() {
+                    *server_remote_addr_lock = Some(remote_addr);
+                    debug!(
+                        "(relay_to_destination) Server remote address set to: {}",
+                        remote_addr
                     );
-                    continue; // Continue to the next iteration after timeout
-                }
-            };
-
-            debug!(
-                "(relay_to_streamer) Received {} bytes from destination: {}",
-                size, remote_addr
-            );
-            // Forward to server.
-            match server_remote_addr {
-                Some(server_addr) => {
-                    match streamer_socket.send_to(&buf[..size], &server_addr).await {
-                        Ok(bytes_sent) => {
-                            debug!("(relay_to_streamer) Sent {} bytes to server", bytes_sent)
-                        }
-                        Err(e) => {
-                            error!("(relay_to_streamer) Failed to send to server: {}", e);
-                            break;
-                        }
-                    }
-                }
-                None => {
-                    error!("(relay_to_streamer) Server address not set, cannot forward packet");
                 }
             }
-        }
-        info!("(relay_to_streamer) Task exiting");
-    });
+            info!("(relay_to_destination) Task exiting");
+        })
+    };
+    // Relay packets from destination to streamer.
+    let relay_to_streamer = {
+        let server_remote_addr_clone = server_remote_addr.clone();
+        tokio::spawn(async move {
+            let mut buf = [0; 2048];
+            debug!("(relay_to_streamer) Task started");
+            loop {
+                let (size, remote_addr) = match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    destination_socket.recv_from(&mut buf),
+                )
+                .await
+                {
+                    Ok(result) => {
+                        match result {
+                            Ok((size, addr)) => (size, addr),
+                            Err(e) => {
+                                error!(
+                                    "(relay_to_streamer) Error receiving from destination: {}",
+                                    e
+                                );
+                                continue; // Continue to the next iteration after error
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "(relay_to_streamer) Timeout receiving from destination: {}",
+                            e
+                        );
+                        continue; // Continue to the next iteration after timeout
+                    }
+                };
+
+                debug!(
+                    "(relay_to_streamer) Received {} bytes from destination: {}",
+                    size, remote_addr
+                );
+                // Forward to server.
+                let server_remote_addr_lock = server_remote_addr_clone.lock().await;
+                match *server_remote_addr_lock {
+                    Some(server_addr) => {
+                        match streamer_socket.send_to(&buf[..size], &server_addr).await {
+                            Ok(bytes_sent) => {
+                                debug!("(relay_to_streamer) Sent {} bytes to server", bytes_sent)
+                            }
+                            Err(e) => {
+                                error!("(relay_to_streamer) Failed to send to server: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    None => {
+                        error!("(relay_to_streamer) Server address not set, cannot forward packet");
+                    }
+                }
+            }
+            info!("(relay_to_streamer) Task exiting");
+        })
+    };
 
     // Wait for relay tasks to complete (they won't unless an error occurs or the socket is closed).
     tokio::select! {
