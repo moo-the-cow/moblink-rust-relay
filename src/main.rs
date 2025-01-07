@@ -26,14 +26,17 @@ struct Args {
     /// Name to identify the relay
     #[arg(short, long, default_value = "Relay")]
     name: String,
+
+    /// Log level
+    #[arg(short, long, default_value = "info")]
+    log_level: String,
 }
 
 #[tokio::main]
 async fn main() {
-    env::set_var("RUST_LOG", "debug"); // Set log level to info, you might want "debug" for development
-    env_logger::init();
-
     let args = Args::parse();
+    env::set_var("RUST_LOG", args.log_level);
+    env_logger::init();
 
     // Wrap the Relay instance in Arc<Mutex>
     let relay = Arc::new(Mutex::new(relay::Relay::new()));
