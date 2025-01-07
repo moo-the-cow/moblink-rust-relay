@@ -163,59 +163,67 @@ impl Relay {
             }
         };
 
-        let ws_in_clone = relay_arc.lock().await.ws_in.clone().unwrap();
+        let ws_in_clone = relay_arc.lock().await.ws_in.clone();
 
-        // Task to process messages received from the channel.
-        tokio::spawn(async move {
-            while let Some(result) = rx.recv().await {
-                match result {
-                    Ok(msg) => match msg {
-                        Message::Text(text) => {
-                            info!("Received text message: {}", text);
-                            if let Ok(deserialized) = serde_json::from_str::<MessageToClient>(&text)
-                            {
-                                match Self::handle_message(
-                                    relay_arc.clone(),
-                                    ws_in_clone.clone(),
-                                    deserialized,
-                                    password.clone(),
-                                    name.clone(),
-                                    relay_id.clone(),
-                                    get_battery_percentage.as_deref(),
-                                )
-                                .await
+        if ws_in_clone.is_none() {
+            error!("Failed to acquire lock to clone WebSocket");
+            return;
+        }
+
+        if let Some(ws_in_clone) = ws_in_clone {
+            // Task to process messages received from the channel.
+            tokio::spawn(async move {
+                while let Some(result) = rx.recv().await {
+                    match result {
+                        Ok(msg) => match msg {
+                            Message::Text(text) => {
+                                info!("Received text message: {}", text);
+                                if let Ok(deserialized) =
+                                    serde_json::from_str::<MessageToClient>(&text)
                                 {
-                                    Ok(_) => info!("Message handled successfully"),
-                                    Err(e) => error!("Error handling message: {}", e),
-                                };
-                            } else {
-                                error!("Failed to deserialize message: {}", text);
+                                    match Self::handle_message(
+                                        relay_arc.clone(),
+                                        ws_in_clone.clone(),
+                                        deserialized,
+                                        password.clone(),
+                                        name.clone(),
+                                        relay_id.clone(),
+                                        get_battery_percentage.as_deref(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => info!("Message handled successfully"),
+                                        Err(e) => error!("Error handling message: {}", e),
+                                    };
+                                } else {
+                                    error!("Failed to deserialize message: {}", text);
+                                }
                             }
+                            Message::Binary(data) => {
+                                debug!("Received binary message of length: {}", data.len());
+                            }
+                            Message::Ping(_) => {
+                                debug!("Received ping message");
+                            }
+                            Message::Pong(_) => {
+                                debug!("Received pong message");
+                            }
+                            Message::Close(frame) => {
+                                info!("Received close message: {:?}", frame);
+                                break;
+                            }
+                            Message::Frame(_) => {
+                                unreachable!("This is never used")
+                            }
+                        },
+                        Err(e) => {
+                            error!("Error processing message: {}", e);
+                            // Implement proper reconnection logic here
                         }
-                        Message::Binary(data) => {
-                            debug!("Received binary message of length: {}", data.len());
-                        }
-                        Message::Ping(_) => {
-                            debug!("Received ping message");
-                        }
-                        Message::Pong(_) => {
-                            debug!("Received pong message");
-                        }
-                        Message::Close(frame) => {
-                            info!("Received close message: {:?}", frame);
-                            break;
-                        }
-                        Message::Frame(_) => {
-                            unreachable!("This is never used")
-                        }
-                    },
-                    Err(e) => {
-                        error!("Error processing message: {}", e);
-                        // Implement proper reconnection logic here
                     }
                 }
-            }
-        });
+            });
+        }
     }
 
     async fn stop_internal(&mut self) {
