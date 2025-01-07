@@ -3,6 +3,15 @@ name = "moblink-rust"
 version = "0.1.0"
 edition = "2021"
 
+# This defines the library
+[lib]
+name = "moblink_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "moblink-rust-relay"
+path = "src/main.rs"
+
 [dependencies]
 base64 = "0.21.5"
 clap = { version = "4.5.23", features = ["derive"] }
