@@ -23,6 +23,10 @@ struct Args {
     #[arg(short, long)]
     password: String,
 
+    /// Bind addresses
+    #[arg(long = "bind-address", num_args = 2..)]
+    bind_addresses: Vec<String>,
+
     /// Log level
     #[arg(short, long, default_value = "info")]
     log_level: String,

@@ -17,6 +17,8 @@ use tokio_tungstenite::{
 use uuid;
 
 pub struct Relay {
+    /// Store one or more local IP addresses for binding UDP sockets
+    pub bind_addresses: Vec<String>,
     relay_id: String,
     streamer_url: String,
     password: String,
@@ -33,6 +35,7 @@ pub struct Relay {
 impl Relay {
     pub fn new() -> Self {
         Self {
+            bind_addresses: Self::get_default_bind_addresses(),
             relay_id: "".to_string(),
             streamer_url: "".to_string(),
             password: "".to_string(),
@@ -44,6 +47,39 @@ impl Relay {
             connected: false,
             wrong_password: false,
         }
+    }
+
+    fn get_default_bind_addresses() -> Vec<String> {
+        // Get main network interface
+        let interfaces = pnet::datalink::interfaces();
+        let interface = interfaces.iter().find(|interface| {
+            interface.is_up() && !interface.is_loopback() && !interface.ips.is_empty()
+        });
+
+        let interface = match interface {
+            Some(interface) => interface,
+            None => {
+                panic!("No available network interfaces found");
+            }
+        };
+
+        // Only ipv4 addresses are supported
+        let ipv4_addresses: Vec<String> = interface
+            .ips
+            .iter()
+            .filter_map(|ip| {
+                let ip = ip.ip();
+                ip.is_ipv4().then(|| ip.to_string())
+            })
+            .collect();
+
+        // Return the first 2 addresses
+        ipv4_addresses.into_iter().take(2).collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn set_bind_addresses(&mut self, addresses: Vec<String>) {
+        self.bind_addresses = addresses;
     }
 
     pub fn generate_relay_id(&self) -> String {
@@ -67,6 +103,8 @@ impl Relay {
         self.streamer_url = streamer_url;
         self.password = password;
         self.name = name;
+        // print bind addresses
+        info!("Bind addresses: {:?}", self.bind_addresses);
         self.update_status_internal().await;
     }
 
@@ -324,6 +362,7 @@ impl Relay {
                 let cloned_ws_in = ws_in.clone();
                 tokio::spawn(async move {
                     match handle_start_tunnel_request(
+                        relay_arc,
                         cloned_ws_in,
                         request_id,
                         start_tunnel.address,
@@ -403,13 +442,39 @@ fn calculate_authentication(password: &str, salt: &str, challenge: &str) -> Stri
 }
 
 async fn handle_start_tunnel_request(
+    relay_arc: Arc<Mutex<Relay>>,
     ws_in: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
     request_id: u32,
     destination_ip: String,
     destination_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Create a UDP socket bound to a random port for receiving packets from the server.
-    let streamer_socket = UdpSocket::bind("0.0.0.0:0")?;
+    // Pick bind addresses from the relay
+    let (local_bind_ip_for_streamer, local_bind_ip_for_destination) = {
+        let relay = relay_arc.lock().await;
+
+        // If user gave at least 1 address, use it for streamer
+        let first_addr = relay
+            .bind_addresses
+            .get(0)
+            .cloned()
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+
+        // If user gave >=2 addresses, use the second for destination
+        let second_addr = relay
+            .bind_addresses
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| first_addr.clone());
+
+        (first_addr, second_addr)
+    };
+
+    info!(
+        "Binding streamer socket on: {}:0, destination socket on: {}:0",
+        local_bind_ip_for_streamer, local_bind_ip_for_destination
+    );
+    // Create a UDP socket bound for receiving packets from the server
+    let streamer_socket = UdpSocket::bind((local_bind_ip_for_streamer.as_str(), 0))?;
     let streamer_port = streamer_socket.local_addr()?.port();
     info!("Listening on UDP port: {}", streamer_port);
     let streamer_socket = Arc::new(tokio::net::UdpSocket::from_std(streamer_socket)?);
@@ -440,8 +505,8 @@ async fn handle_start_tunnel_request(
         locked_ws_in.send(Message::Text(text)).await?;
     } // Mutex lock is released here
 
-    // Create a new UDP socket for communication with the destination.
-    let destination_socket = UdpSocket::bind("0.0.0.0:0")?;
+    // Create a new UDP socket for communication with the destination
+    let destination_socket = UdpSocket::bind((local_bind_ip_for_destination.as_str(), 0))?;
     info!(
         "Bound destination socket to: {:?}",
         destination_socket.local_addr()?
