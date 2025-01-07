@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct Present {
-    pub(crate) dummy: Option<bool>,
-}
+pub struct Present {}
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct MoblinkResult {

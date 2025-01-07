@@ -341,7 +341,7 @@ impl Relay {
                         let response = MessageResponse {
                             id: request.id,
                             result: MoblinkResult {
-                                ok: Some(Present { dummy: Some(true) }),
+                                ok: Some(Present {}),
                                 wrong_password: None,
                             },
                             data,
@@ -409,7 +409,7 @@ async fn handle_start_tunnel_request(
     let response = MessageResponse {
         id: request_id,
         result: MoblinkResult {
-            ok: Some(Present { dummy: Some(true) }),
+            ok: Some(Present {}),
             wrong_password: None,
         },
         data,
