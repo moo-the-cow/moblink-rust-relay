@@ -21,6 +21,7 @@ pub struct Authentication {
 #[derive(Deserialize, Debug)]
 pub struct Hello {
     #[serde(rename = "apiVersion")]
+    #[allow(dead_code)]
     pub api_version: String,
     pub authentication: Authentication,
 }
@@ -39,7 +40,9 @@ pub struct StartTunnelRequest {
 #[derive(Deserialize, Debug)]
 pub struct MessageRequestData {
     #[serde(rename = "startTunnel")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_tunnel: Option<StartTunnelRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<Present>,
 }
 
