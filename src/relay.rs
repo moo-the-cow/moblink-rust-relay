@@ -354,6 +354,7 @@ impl Relay {
                         };
                         let text = serde_json::to_string(&message).unwrap(); // Consider handling this error properly
 
+                        log::info!("Sending status response: {}", text);
                         let cloned_ws_in = ws_in.clone();
                         tokio::spawn(async move {
                             let mut locked_ws_in = cloned_ws_in.lock().await;
