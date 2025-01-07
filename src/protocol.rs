@@ -67,6 +67,7 @@ pub struct StatusResponseData {
 pub struct ResponseData {
     #[serde(skip_serializing_if = "Option::is_none", rename = "startTunnel")]
     pub start_tunnel: Option<StartTunnelResponseData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<StatusResponseData>,
 }
 
