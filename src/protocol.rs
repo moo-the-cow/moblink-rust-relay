@@ -7,8 +7,9 @@ pub struct Present {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct MoblinkResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ok: Option<Present>,
-    #[serde(rename = "wrongPassword")]
+    #[serde(skip_serializing_if = "Option::is_none", rename = "wrongPassword")]
     pub wrong_password: Option<Present>,
 }
 
@@ -39,8 +40,7 @@ pub struct StartTunnelRequest {
 
 #[derive(Deserialize, Debug)]
 pub struct MessageRequestData {
-    #[serde(rename = "startTunnel")]
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", rename = "startTunnel")]
     pub start_tunnel: Option<StartTunnelRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<Present>,
@@ -86,8 +86,11 @@ pub struct Identify {
 
 #[derive(Deserialize, Debug)]
 pub struct MessageToClient {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hello: Option<Hello>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub identified: Option<Identified>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub request: Option<MessageRequest>,
 }
 
