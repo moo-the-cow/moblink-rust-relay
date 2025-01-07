@@ -65,7 +65,7 @@ pub struct StatusResponseData {
 
 #[derive(Serialize, Debug)]
 pub struct ResponseData {
-    #[serde(rename = "startTunnel")]
+    #[serde(skip_serializing_if = "Option::is_none", rename = "startTunnel")]
     pub start_tunnel: Option<StartTunnelResponseData>,
     pub status: Option<StatusResponseData>,
 }
