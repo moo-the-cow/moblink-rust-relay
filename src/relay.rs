@@ -325,109 +325,99 @@ impl Relay {
         relay_id: String,
         get_battery_percentage: Option<&(dyn Fn(Box<dyn FnOnce(i32)>) + Send + Sync)>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(hello) = message.hello {
-            let authentication = calculate_authentication(
-                &password,
-                &hello.authentication.salt,
-                &hello.authentication.challenge,
-            );
-            let identify = Identify {
-                id: relay_id,
-                name,
-                authentication,
-            };
-            let message = MessageToServer {
-                identify: Some(identify),
-                response: None,
-            };
-            let text = serde_json::to_string(&message)?;
-            let mut locked_ws_in = ws_in.lock().await;
-            info!("Sending identify message: {}", text);
-            locked_ws_in.send(Message::Text(text)).await?;
-            Ok(())
-        } else if let Some(identified) = message.identified {
-            info!("Received identified message: {:?}", identified);
-            let mut relay = relay_arc.lock().await;
-            if identified.result.ok.is_some() {
-                relay.connected = true;
-            } else if identified.result.wrong_password.is_some() {
-                relay.wrong_password = true;
-            }
-            relay.update_status_internal().await;
-            Ok(())
-        } else if let Some(request) = message.request {
-            if let Some(start_tunnel) = request.data.start_tunnel {
-                info!("Received start tunnel request: {:?}", start_tunnel);
-                let request_id = request.id;
-                let cloned_ws_in = ws_in.clone();
-                tokio::spawn(async move {
-                    match handle_start_tunnel_request(
-                        relay_arc,
-                        cloned_ws_in,
-                        request_id,
-                        start_tunnel.address,
-                        start_tunnel.port,
-                    )
-                    .await
-                    {
-                        Ok(_) => info!("Start tunnel request handled successfully."),
-                        Err(e) => error!("Error handling start tunnel request: {}", e),
-                    };
-                });
+        match message {
+            MessageToClient::Hello(hello) => {
+                let authentication = calculate_authentication(
+                    &password,
+                    &hello.authentication.salt,
+                    &hello.authentication.challenge,
+                );
+                let identify = Identify {
+                    id: relay_id,
+                    name,
+                    authentication,
+                };
+                let message = MessageToServer::Identify(identify);
+                let text = serde_json::to_string(&message)?;
+                let mut locked_ws_in = ws_in.lock().await;
+                info!("Sending identify message: {}", text);
+                locked_ws_in.send(Message::Text(text)).await?;
                 Ok(())
-            } else if request.data.status.is_some() {
-                if let Some(get_battery_percentage) = get_battery_percentage {
-                    info!("Handling status request");
-                    get_battery_percentage(Box::new(move |battery_percentage| {
-                        let data = ResponseData {
-                            start_tunnel: None,
-                            status: Some(StatusResponseData {
-                                battery_percentage: Some(battery_percentage),
-                            }),
-                        };
-                        let response = MessageResponse {
-                            id: request.id,
-                            result: MoblinkResult {
-                                ok: Some(Present {}),
-                                wrong_password: None,
-                            },
-                            data,
-                        };
-                        let message = MessageToServer {
-                            identify: None,
-                            response: Some(response),
-                        };
-                        let text = serde_json::to_string(&message);
-
-                        if let Err(e) = text {
-                            error!("Failed to serialize status response: {}", e);
-                            return;
-                        }
-
-                        if let Ok(text) = text {
-                            log::info!("Sending status response: {}", text);
-                            let cloned_ws_in = ws_in.clone();
-                            tokio::spawn(async move {
-                                let mut locked_ws_in = cloned_ws_in.lock().await;
-                                match locked_ws_in.send(Message::Text(text)).await {
-                                    Ok(_) => info!("Status response sent successfully."),
-                                    Err(e) => error!("Failed to send status response: {}", e),
-                                }
-                            });
-                        }
-                    }));
-                    Ok(())
-                } else {
-                    error!("get_battery_percentage is not set");
-                    Err("get_battery_percentage function not set".into())
+            }
+            MessageToClient::Identified(identified) => {
+                info!("Received identified message: {:?}", identified);
+                let mut relay = relay_arc.lock().await;
+                match identified.result {
+                    MoblinkResult::Ok(_) => {
+                        relay.connected = true;
+                    }
+                    MoblinkResult::WrongPassword(_) => {
+                        relay.wrong_password = true;
+                    }
                 }
-            } else {
-                error!("Received unknown request: {:?}", request);
+                relay.update_status_internal().await;
                 Ok(())
             }
-        } else {
-            error!("Received unknown message: {:?}", message);
-            Ok(())
+            MessageToClient::Request(request) => match request.data {
+                MessageRequestData::StartTunnel(start_tunnel) => {
+                    info!("Received start tunnel request: {:?}", start_tunnel);
+                    let request_id = request.id;
+                    let cloned_ws_in = ws_in.clone();
+                    tokio::spawn(async move {
+                        match handle_start_tunnel_request(
+                            relay_arc,
+                            cloned_ws_in,
+                            request_id,
+                            start_tunnel.address,
+                            start_tunnel.port,
+                        )
+                        .await
+                        {
+                            Ok(_) => info!("Start tunnel request handled successfully."),
+                            Err(e) => error!("Error handling start tunnel request: {}", e),
+                        };
+                    });
+                    Ok(())
+                }
+                MessageRequestData::Status(_) => {
+                    if let Some(get_battery_percentage) = get_battery_percentage {
+                        info!("Handling status request");
+                        get_battery_percentage(Box::new(move |battery_percentage| {
+                            let data = ResponseData::Status(StatusResponseData::BatteryPercentage(
+                                battery_percentage,
+                            ));
+                            let response = MessageResponse {
+                                id: request.id,
+                                result: MoblinkResult::Ok(Present {}),
+                                data,
+                            };
+                            let message = MessageToServer::Response(response);
+                            let text = serde_json::to_string(&message);
+
+                            if let Err(e) = text {
+                                error!("Failed to serialize status response: {}", e);
+                                return;
+                            }
+
+                            if let Ok(text) = text {
+                                log::info!("Sending status response: {}", text);
+                                let cloned_ws_in = ws_in.clone();
+                                tokio::spawn(async move {
+                                    let mut locked_ws_in = cloned_ws_in.lock().await;
+                                    match locked_ws_in.send(Message::Text(text)).await {
+                                        Ok(_) => info!("Status response sent successfully."),
+                                        Err(e) => error!("Failed to send status response: {}", e),
+                                    }
+                                });
+                            }
+                        }));
+                        Ok(())
+                    } else {
+                        error!("get_battery_percentage is not set");
+                        Err("get_battery_percentage function not set".into())
+                    }
+                }
+            },
         }
     }
 }
@@ -480,24 +470,15 @@ async fn handle_start_tunnel_request(
     let streamer_socket = Arc::new(tokio::net::UdpSocket::from_std(streamer_socket)?);
 
     // Inform the server about the chosen port.
-    let data = ResponseData {
-        start_tunnel: Some(StartTunnelResponseData {
-            port: streamer_port,
-        }),
-        status: None,
-    };
+    let data = ResponseData::StartTunnel(StartTunnelResponseData {
+        port: streamer_port,
+    });
     let response = MessageResponse {
         id: request_id,
-        result: MoblinkResult {
-            ok: Some(Present {}),
-            wrong_password: None,
-        },
+        result: MoblinkResult::Ok(Present {}),
         data,
     };
-    let message = MessageToServer {
-        identify: None,
-        response: Some(response),
-    };
+    let message = MessageToServer::Response(response);
     let text = serde_json::to_string(&message)?;
     {
         let mut locked_ws_in = ws_in.lock().await;
