@@ -4,11 +4,10 @@ use serde::{Deserialize, Serialize};
 pub struct Present {}
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct MoblinkResult {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ok: Option<Present>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "wrongPassword")]
-    pub wrong_password: Option<Present>,
+#[serde(rename_all = "camelCase")]
+pub enum MoblinkResult {
+    Ok(Present),
+    WrongPassword(Present),
 }
 
 #[derive(Deserialize, Debug)]
@@ -37,11 +36,10 @@ pub struct StartTunnelRequest {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct MessageRequestData {
-    #[serde(skip_serializing_if = "Option::is_none", rename = "startTunnel")]
-    pub start_tunnel: Option<StartTunnelRequest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<Present>,
+#[serde(rename_all = "camelCase")]
+pub enum MessageRequestData {
+    StartTunnel(StartTunnelRequest),
+    Status(Present),
 }
 
 #[derive(Deserialize, Debug)]
@@ -56,17 +54,16 @@ pub struct StartTunnelResponseData {
 }
 
 #[derive(Serialize, Debug)]
-pub struct StatusResponseData {
-    #[serde(rename = "batteryPercentage")]
-    pub battery_percentage: Option<i32>,
+#[serde(rename_all = "camelCase")]
+pub enum StatusResponseData {
+    BatteryPercentage(i32),
 }
 
 #[derive(Serialize, Debug)]
-pub struct ResponseData {
-    #[serde(skip_serializing_if = "Option::is_none", rename = "startTunnel")]
-    pub start_tunnel: Option<StartTunnelResponseData>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<StatusResponseData>,
+#[serde(rename_all = "camelCase")]
+pub enum ResponseData {
+    StartTunnel(StartTunnelResponseData),
+    Status(StatusResponseData),
 }
 
 #[derive(Serialize, Debug)]
@@ -84,19 +81,16 @@ pub struct Identify {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct MessageToClient {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hello: Option<Hello>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub identified: Option<Identified>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request: Option<MessageRequest>,
+#[serde(rename_all = "camelCase")]
+pub enum MessageToClient {
+    Hello(Hello),
+    Identified(Identified),
+    Request(MessageRequest),
 }
 
 #[derive(Serialize, Debug)]
-pub struct MessageToServer {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub identify: Option<Identify>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response: Option<MessageResponse>,
+#[serde(rename_all = "camelCase")]
+pub enum MessageToServer {
+    Identify(Identify),
+    Response(MessageResponse),
 }
