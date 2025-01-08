@@ -24,7 +24,7 @@ struct Args {
     password: String,
 
     /// Bind addresses
-    #[arg(long = "bind-address", num_args = 2..)]
+    #[arg(short, long = "bind-address", num_args = 0..2)]
     bind_addresses: Vec<String>,
 
     /// Log level
@@ -44,6 +44,7 @@ async fn main() {
     // Call setup on the wrapped Relay
     {
         let mut relay_lock = relay.lock().await;
+        relay_lock.set_bind_addresses(args.bind_addresses);
         relay_lock
             .setup(
                 args.streamer_url,
