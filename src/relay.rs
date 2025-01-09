@@ -168,7 +168,7 @@ impl Relay {
 
         let (tx, mut rx) =
             mpsc::channel::<Result<Message, tokio_tungstenite::tungstenite::Error>>(32);
-        match connect_async(request).await {
+        match connect_async(request.to_string()).await {
             Ok((ws_stream, _)) => {
                 info!("WebSocket connected");
                 let (write, mut read) = ws_stream.split();
@@ -337,7 +337,7 @@ impl Relay {
                 let text = serde_json::to_string(&message)?;
                 let mut locked_ws_in = ws_in.lock().await;
                 info!("Sending identify message: {}", text);
-                locked_ws_in.send(Message::Text(text)).await?;
+                locked_ws_in.send(Message::Text(text.into())).await?;
                 Ok(())
             }
             MessageToRelay::Identified(identified) => {
@@ -400,7 +400,7 @@ impl Relay {
                                 let cloned_ws_in = ws_in.clone();
                                 tokio::spawn(async move {
                                     let mut locked_ws_in = cloned_ws_in.lock().await;
-                                    match locked_ws_in.send(Message::Text(text)).await {
+                                    match locked_ws_in.send(Message::Text(text.into())).await {
                                         Ok(_) => info!("Status response sent successfully."),
                                         Err(e) => error!("Failed to send status response: {}", e),
                                     }
@@ -479,7 +479,7 @@ async fn handle_start_tunnel_request(
     {
         let mut locked_ws_in = ws_in.lock().await;
         info!("Sending start tunnel response: {}", text);
-        locked_ws_in.send(Message::Text(text)).await?;
+        locked_ws_in.send(Message::Text(text.into())).await?;
     } // Mutex lock is released here
 
     // Create a new UDP socket for communication with the destination
