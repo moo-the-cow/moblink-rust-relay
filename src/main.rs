@@ -53,7 +53,9 @@ async fn main() {
     // Call setup on the wrapped Relay
     {
         let mut relay_lock = relay.lock().await;
-        relay_lock.set_bind_addresses(args.bind_addresses);
+        if args.bind_addresses.len() > 0 {
+            relay_lock.set_bind_addresses(args.bind_addresses);
+        }
         // If a UUID is not provided, generate a new one
         let id = if args.id.is_empty() {
             generate_relay_id()
