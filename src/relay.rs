@@ -14,7 +14,6 @@ use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{
     connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
 };
-use uuid;
 
 pub struct Relay {
     /// Store one or more local IP addresses for binding UDP sockets
@@ -82,14 +81,11 @@ impl Relay {
         self.bind_addresses = addresses;
     }
 
-    pub fn generate_relay_id(&self) -> String {
-        uuid::Uuid::new_v4().to_string()
-    }
-
     pub async fn setup<F, G>(
         &mut self,
         streamer_url: String,
         password: String,
+        relay_id: String,
         name: String,
         on_status_updated: F,
         get_battery_percentage: G,
@@ -99,7 +95,7 @@ impl Relay {
     {
         self.on_status_updated = Some(Box::new(on_status_updated));
         self.get_battery_percentage = Some(Arc::new(get_battery_percentage));
-        self.relay_id = self.generate_relay_id();
+        self.relay_id = relay_id;
         self.streamer_url = streamer_url;
         self.password = password;
         self.name = name;
