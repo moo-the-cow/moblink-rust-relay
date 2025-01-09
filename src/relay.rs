@@ -262,7 +262,14 @@ impl Relay {
                         },
                         Err(e) => {
                             error!("Error processing message: {}", e);
-                            // Implement proper reconnection logic here
+                            // TODO: There has to be a better way to handle this
+                            if e.to_string()
+                                .contains("Connection reset without closing handshake")
+                            {
+                                let relay_arc_clone = relay_arc.clone();
+                                Self::reconnect_soon(relay_arc_clone).await;
+                            }
+                            break;
                         }
                     }
                 }
