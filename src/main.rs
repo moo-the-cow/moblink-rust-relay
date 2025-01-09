@@ -21,7 +21,7 @@ struct Args {
     name: String,
 
     /// Relay ID (valid UUID)
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = String::new())]
     id: String,
 
     /// Streamer URL (websocket)
