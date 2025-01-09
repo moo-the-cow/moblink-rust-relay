@@ -516,7 +516,7 @@ async fn handle_start_tunnel_request(
             loop {
                 let mut buf = [0; 2048];
                 let (size, remote_addr) = match tokio::time::timeout(
-                    Duration::from_secs(5),
+                    Duration::from_secs(30),
                     streamer_socket_clone.recv_from(&mut buf),
                 )
                 .await
@@ -584,7 +584,7 @@ async fn handle_start_tunnel_request(
             loop {
                 let mut buf = [0; 2048];
                 let (size, remote_addr) = match tokio::time::timeout(
-                    Duration::from_secs(5),
+                    Duration::from_secs(30),
                     destination_socket.recv_from(&mut buf),
                 )
                 .await
