@@ -217,7 +217,7 @@ impl Relay {
                             Message::Text(text) => {
                                 info!("Received text message: {}", text);
                                 if let Ok(deserialized) =
-                                    serde_json::from_str::<MessageToClient>(&text)
+                                    serde_json::from_str::<MessageToRelay>(&text)
                                 {
                                     match Self::handle_message(
                                         relay_arc.clone(),
@@ -319,14 +319,14 @@ impl Relay {
                 >,
             >,
         >,
-        message: MessageToClient,
+        message: MessageToRelay,
         password: String,
         name: String,
         relay_id: String,
         get_battery_percentage: Option<&(dyn Fn(Box<dyn FnOnce(i32)>) + Send + Sync)>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match message {
-            MessageToClient::Hello(hello) => {
+            MessageToRelay::Hello(hello) => {
                 let authentication = calculate_authentication(
                     &password,
                     &hello.authentication.salt,
@@ -337,14 +337,14 @@ impl Relay {
                     name,
                     authentication,
                 };
-                let message = MessageToServer::Identify(identify);
+                let message = MessageToStreamer::Identify(identify);
                 let text = serde_json::to_string(&message)?;
                 let mut locked_ws_in = ws_in.lock().await;
                 info!("Sending identify message: {}", text);
                 locked_ws_in.send(Message::Text(text)).await?;
                 Ok(())
             }
-            MessageToClient::Identified(identified) => {
+            MessageToRelay::Identified(identified) => {
                 info!("Received identified message: {:?}", identified);
                 let mut relay = relay_arc.lock().await;
                 match identified.result {
@@ -358,7 +358,7 @@ impl Relay {
                 relay.update_status_internal().await;
                 Ok(())
             }
-            MessageToClient::Request(request) => match request.data {
+            MessageToRelay::Request(request) => match request.data {
                 MessageRequestData::StartTunnel(start_tunnel) => {
                     info!("Received start tunnel request: {:?}", start_tunnel);
                     let request_id = request.id;
@@ -391,7 +391,7 @@ impl Relay {
                                 result: MoblinkResult::Ok(Present {}),
                                 data,
                             };
-                            let message = MessageToServer::Response(response);
+                            let message = MessageToStreamer::Response(response);
                             let text = serde_json::to_string(&message);
 
                             if let Err(e) = text {
@@ -478,7 +478,7 @@ async fn handle_start_tunnel_request(
         result: MoblinkResult::Ok(Present {}),
         data,
     };
-    let message = MessageToServer::Response(response);
+    let message = MessageToStreamer::Response(response);
     let text = serde_json::to_string(&message)?;
     {
         let mut locked_ws_in = ws_in.lock().await;

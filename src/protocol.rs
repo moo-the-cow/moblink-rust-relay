@@ -82,7 +82,7 @@ pub struct Identify {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub enum MessageToClient {
+pub enum MessageToRelay {
     Hello(Hello),
     Identified(Identified),
     Request(MessageRequest),
@@ -90,7 +90,7 @@ pub enum MessageToClient {
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub enum MessageToServer {
+pub enum MessageToStreamer {
     Identify(Identify),
     Response(MessageResponse),
 }
