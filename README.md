@@ -29,6 +29,7 @@ cargo build --release
 # 3. Run the relay
 ./target/release/moblink-rust-relay \
   --name "RelayName" \
+  --id "UUID" \
   --streamer-url ws://192.168.1.2:7777 \
   --password "secret123" \
   --bind-address 192.168.1.10 \
@@ -41,6 +42,7 @@ cargo build --release
 | Argument         | Description                                                                  | Default       | Example                                     |
 |------------------|------------------------------------------------------------------------------|---------------|---------------------------------------------|
 | `--name`         | Name to identify the relay                                                    | `Relay`       | `--name CameraRelay1`                       |
+| `--id`           | UUID to identify the Relay                                                    | Generated     | `--id UUID`                                 |
 | `--streamer-url` | WebSocket URL to connect to the streamer                                      | _None_        | `--streamer-url wss://example.com/ws`       |
 | `--password`     | Password used in the challenge–response authentication                        | _None_        | `--password mySecret`                       |
 | `--log-level`    | Logging verbosity (e.g., error, warn, info, debug, trace)                    | `info`        | `--log-level debug`                         |
