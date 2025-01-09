@@ -3,7 +3,9 @@ use base64::{engine::general_purpose, Engine as _};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use log::{debug, error, info};
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{
@@ -168,7 +170,7 @@ impl Relay {
 
         let (tx, mut rx) =
             mpsc::channel::<Result<Message, tokio_tungstenite::tungstenite::Error>>(32);
-        match tokio::time::timeout(Duration::from_secs(30), connect_async(request.to_string()))
+        match tokio::time::timeout(Duration::from_secs(10), connect_async(request.to_string()))
             .await
         {
             Ok(Ok((ws_stream, _))) => {
@@ -192,11 +194,15 @@ impl Relay {
             Ok(Err(e)) => {
                 // This means the future completed but the connection failed
                 error!("WebSocket connection failed immediately: {}", e);
+                let relay_arc_clone = relay_arc.clone();
+                Self::reconnect_soon(relay_arc_clone).await;
                 return;
             }
             Err(_elapsed) => {
                 // This means the future did NOT complete within 10 seconds
                 error!("WebSocket connection attempt timed out after 10 seconds");
+                let relay_arc_clone = relay_arc.clone();
+                Self::reconnect_soon(relay_arc_clone).await;
                 return;
             }
         };
@@ -298,15 +304,18 @@ impl Relay {
         }
     }
 
-    #[allow(dead_code)]
-    async fn reconnect_soon(relay_arc: Arc<Mutex<Self>>) {
-        {
-            let mut relay = relay_arc.lock().await;
-            relay.stop_internal().await;
-        }
-        info!("Reconnecting in 5 seconds...");
-        sleep(Duration::from_secs(5)).await;
-        Self::start_internal(relay_arc.clone()).await;
+    fn reconnect_soon(relay_arc: Arc<Mutex<Self>>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            {
+                let mut relay = relay_arc.lock().await;
+                relay.stop_internal().await;
+            }
+
+            info!("Reconnecting in 5 seconds...");
+            sleep(Duration::from_secs(5)).await;
+
+            Self::start_internal(relay_arc.clone()).await;
+        })
     }
 
     async fn handle_message(
