@@ -168,8 +168,10 @@ impl Relay {
 
         let (tx, mut rx) =
             mpsc::channel::<Result<Message, tokio_tungstenite::tungstenite::Error>>(32);
-        match connect_async(request.to_string()).await {
-            Ok((ws_stream, _)) => {
+        match tokio::time::timeout(Duration::from_secs(30), connect_async(request.to_string()))
+            .await
+        {
+            Ok(Ok((ws_stream, _))) => {
                 info!("WebSocket connected");
                 let (write, mut read) = ws_stream.split();
                 {
@@ -186,14 +188,16 @@ impl Relay {
                     }
                 });
             }
-            Err(e) => {
-                error!("WebSocket connection failed: {}", e);
 
-                // TODO: Implement proper reconnection logic here
-                /*let relay_arc_clone = relay_arc.clone();
-                tokio::spawn(async move {
-                    Self::reconnect_soon(relay_arc_clone).await;
-                });*/
+            Ok(Err(e)) => {
+                // This means the future completed but the connection failed
+                error!("WebSocket connection failed immediately: {}", e);
+                return;
+            }
+            Err(_elapsed) => {
+                // This means the future did NOT complete within 10 seconds
+                error!("WebSocket connection attempt timed out after 10 seconds");
+                return;
             }
         };
 
