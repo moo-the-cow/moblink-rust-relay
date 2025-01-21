@@ -479,14 +479,16 @@ async fn create_dual_stack_udp_socket(
     Ok(socket)
 }
 
-// Helper function to parse a string into a SocketAddr, handling IP addresses without ports.
+// Helper function to parse a string into a SocketAddr, handling IP addresses
+// without ports.
 fn parse_socket_addr(addr_str: &str) -> Result<SocketAddr, std::io::Error> {
     // Attempt to parse the string as a full SocketAddr (IP:port)
     if let Ok(socket_addr) = SocketAddr::from_str(addr_str) {
         return Ok(socket_addr);
     }
 
-    // If parsing as SocketAddr fails, try parsing as IP address and append default port
+    // If parsing as SocketAddr fails, try parsing as IP address and append default
+    // port
     if let Ok(ip_addr) = IpAddr::from_str(addr_str) {
         // Use 0 as the default port, allowing the OS to assign an available port
         return Ok(SocketAddr::new(ip_addr, 0));
