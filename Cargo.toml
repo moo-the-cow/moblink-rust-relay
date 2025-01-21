@@ -1,6 +1,6 @@
 [package]
 name = "moblink-rust"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 # This defines the library
@@ -13,16 +13,17 @@ name = "moblink-rust-relay"
 path = "src/main.rs"
 
 [dependencies]
-base64 = "0.21.5"
-clap = { version = "4.5.23", features = ["derive"] }
-futures-util = "0.3.29"
+base64 = "0.22.1"
+clap = { version = "4.5.24", features = ["derive"] }
+futures-util = "0.3.31"
 sha2 = "0.10.8"
-tokio = { version = "1.33.0", features = ["full"] }
-tokio-tungstenite = "0.20.1"
-serde = { version = "1.0.190", features = ["derive"] }
-serde_json = "1.0.107"
-url = "2.5.0"
+tokio = { version = "1.43.0", features = ["full"] }
+tokio-tungstenite = "0.26.1"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.135"
+url = "2.5.4"
 log = "0.4"
-env_logger = "0.10"
-uuid = { version = "1.0", features = ["v4"] }
+env_logger = "0.11"
+uuid = { version = "1.11", features = ["v4"] }
 pnet = "0.35.0"
+socket2 = "0.5.8"

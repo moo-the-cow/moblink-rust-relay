@@ -1,12 +1,17 @@
 mod protocol;
 mod relay;
 
-use clap::Parser;
-use env_logger;
-use log::info;
 use std::env;
 use std::sync::Arc;
+
+use clap::Parser;
+use log::info;
 use tokio::sync::Mutex;
+use {env_logger, uuid};
+
+pub fn generate_relay_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -14,6 +19,10 @@ struct Args {
     /// Name to identify the relay
     #[arg(short, long, default_value = "Relay")]
     name: String,
+
+    /// Relay ID (valid UUID)
+    #[arg(short, long, default_value_t = String::new())]
+    id: String,
 
     /// Streamer URL (websocket)
     #[arg(short = 'u', long)]
@@ -44,11 +53,20 @@ async fn main() {
     // Call setup on the wrapped Relay
     {
         let mut relay_lock = relay.lock().await;
-        relay_lock.set_bind_addresses(args.bind_addresses);
+        if args.bind_addresses.len() > 0 {
+            relay_lock.set_bind_addresses(args.bind_addresses);
+        }
+        // If a UUID is not provided, generate a new one
+        let id = if args.id.is_empty() {
+            generate_relay_id()
+        } else {
+            args.id
+        };
         relay_lock
             .setup(
                 args.streamer_url,
                 args.password,
+                id,
                 args.name,
                 move |status| {
                     info!("Status updated: {}", status);
