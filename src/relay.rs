@@ -1,21 +1,22 @@
-use crate::protocol::*;
-use base64::{engine::general_purpose, Engine as _};
-use futures_util::{stream::SplitSink, SinkExt, StreamExt};
-use log::{debug, error, info};
-use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::pin::Pin;
 use std::sync::Arc;
+
+use base64::engine::general_purpose;
+use base64::Engine as _;
+use futures_util::stream::SplitSink;
+use futures_util::{SinkExt, StreamExt};
+use log::{debug, error, info};
+use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
-use tokio::sync::{
-    mpsc::{self},
-    Mutex,
-};
+use tokio::sync::mpsc::{self};
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
-use tokio_tungstenite::{
-    connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
-};
+use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+
+use crate::protocol::*;
 
 pub struct Relay {
     /// Store one or more local IP addresses for binding UDP sockets
@@ -546,7 +547,8 @@ async fn handle_start_tunnel_request(
                             Ok((size, addr)) => (size, addr),
                             Err(e) => {
                                 error!("(relay_to_destination) Error receiving from server: {}", e);
-                                continue; // Continue to the next iteration after error
+                                continue; // Continue to the next iteration
+                                          // after error
                             }
                         }
                     }
@@ -555,7 +557,8 @@ async fn handle_start_tunnel_request(
                             "(relay_to_destination) Timeout receiving from server: {}",
                             e
                         );
-                        continue; // Continue to the next iteration after timeout
+                        continue; // Continue to the next iteration after
+                                  // timeout
                     }
                 };
 
@@ -617,7 +620,8 @@ async fn handle_start_tunnel_request(
                                     "(relay_to_streamer) Error receiving from destination: {}",
                                     e
                                 );
-                                continue; // Continue to the next iteration after error
+                                continue; // Continue to the next iteration
+                                          // after error
                             }
                         }
                     }
@@ -626,7 +630,8 @@ async fn handle_start_tunnel_request(
                             "(relay_to_streamer) Timeout receiving from destination: {}",
                             e
                         );
-                        continue; // Continue to the next iteration after timeout
+                        continue; // Continue to the next iteration after
+                                  // timeout
                     }
                 };
 
@@ -657,7 +662,8 @@ async fn handle_start_tunnel_request(
         })
     };
 
-    // Wait for relay tasks to complete (they won't unless an error occurs or the socket is closed).
+    // Wait for relay tasks to complete (they won't unless an error occurs or the
+    // socket is closed).
     tokio::select! {
         res = relay_to_destination => {
             if let Err(e) = res {

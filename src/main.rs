@@ -1,13 +1,13 @@
 mod protocol;
 mod relay;
 
-use clap::Parser;
-use env_logger;
-use log::info;
 use std::env;
 use std::sync::Arc;
+
+use clap::Parser;
+use log::info;
 use tokio::sync::Mutex;
-use uuid;
+use {env_logger, uuid};
 
 pub fn generate_relay_id() -> String {
     uuid::Uuid::new_v4().to_string()
