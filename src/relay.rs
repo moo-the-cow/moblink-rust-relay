@@ -1,6 +1,7 @@
 use std::future::Future;
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use base64::engine::general_purpose;
@@ -448,6 +449,55 @@ fn calculate_authentication(password: &str, salt: &str, challenge: &str) -> Stri
     general_purpose::STANDARD.encode(hash2)
 }
 
+async fn create_dual_stack_udp_socket(
+    addr: SocketAddr,
+) -> Result<tokio::net::UdpSocket, std::io::Error> {
+    let socket = match addr.is_ipv4() {
+        true => {
+            // Create an IPv4 socket
+            tokio::net::UdpSocket::bind(addr).await?
+        }
+        false => {
+            // Create a dual-stack socket (supporting both IPv4 and IPv6)
+            let socket = socket2::Socket::new(
+                socket2::Domain::IPV6,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )?;
+
+            // Set IPV6_V6ONLY to false to enable dual-stack support
+            socket.set_only_v6(false)?;
+
+            // Bind the socket
+            socket.bind(&socket2::SockAddr::from(addr))?;
+
+            // Convert to a tokio UdpSocket
+            tokio::net::UdpSocket::from_std(socket.into())?
+        }
+    };
+
+    Ok(socket)
+}
+
+// Helper function to parse a string into a SocketAddr, handling IP addresses without ports.
+fn parse_socket_addr(addr_str: &str) -> Result<SocketAddr, std::io::Error> {
+    // Attempt to parse the string as a full SocketAddr (IP:port)
+    if let Ok(socket_addr) = SocketAddr::from_str(addr_str) {
+        return Ok(socket_addr);
+    }
+
+    // If parsing as SocketAddr fails, try parsing as IP address and append default port
+    if let Ok(ip_addr) = IpAddr::from_str(addr_str) {
+        // Use 0 as the default port, allowing the OS to assign an available port
+        return Ok(SocketAddr::new(ip_addr, 0));
+    }
+
+    // Return an error if both attempts fail
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "Invalid socket address syntax. Expected 'IP:port' or 'IP'.",
+    ))
+}
 async fn handle_start_tunnel_request(
     relay_arc: Arc<Mutex<Relay>>,
     ws_in: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
@@ -456,7 +506,7 @@ async fn handle_start_tunnel_request(
     destination_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Pick bind addresses from the relay
-    let (local_bind_ip_for_streamer, local_bind_ip_for_destination) = {
+    let (local_bind_addr_for_streamer, local_bind_addr_for_destination) = {
         let relay = relay_arc.lock().await;
 
         // If user gave at least 1 address, use it for streamer
@@ -464,7 +514,7 @@ async fn handle_start_tunnel_request(
             .bind_addresses
             .get(0)
             .cloned()
-            .unwrap_or_else(|| "0.0.0.0".to_string());
+            .unwrap_or_else(|| "0.0.0.0:0".to_string()); // Add port 0
 
         // If user gave >=2 addresses, use the second for destination
         let second_addr = relay
@@ -472,19 +522,22 @@ async fn handle_start_tunnel_request(
             .get(1)
             .cloned()
             .unwrap_or_else(|| first_addr.clone());
-
-        (first_addr, second_addr)
+        (
+            parse_socket_addr(&first_addr)?,
+            parse_socket_addr(&second_addr)?,
+        )
     };
 
     info!(
-        "Binding streamer socket on: {}:0, destination socket on: {}:0",
-        local_bind_ip_for_streamer, local_bind_ip_for_destination
+        "Binding streamer socket on: {}, destination socket on: {}",
+        local_bind_addr_for_streamer, local_bind_addr_for_destination
     );
-    // Create a UDP socket bound for receiving packets from the server
-    let streamer_socket = UdpSocket::bind((local_bind_ip_for_streamer.as_str(), 0))?;
+    // Create a UDP socket bound for receiving packets from the server.
+    // Use dual-stack socket creation.
+    let streamer_socket = create_dual_stack_udp_socket(local_bind_addr_for_streamer).await?;
     let streamer_port = streamer_socket.local_addr()?.port();
     info!("Listening on UDP port: {}", streamer_port);
-    let streamer_socket = Arc::new(tokio::net::UdpSocket::from_std(streamer_socket)?);
+    let streamer_socket = Arc::new(streamer_socket);
 
     // Inform the server about the chosen port.
     let data = ResponseData::StartTunnel(StartTunnelResponseData {
@@ -503,28 +556,34 @@ async fn handle_start_tunnel_request(
         locked_ws_in.send(Message::Text(text.into())).await?;
     } // Mutex lock is released here
 
-    // Create a new UDP socket for communication with the destination
-    let destination_socket = UdpSocket::bind((local_bind_ip_for_destination.as_str(), 0))?;
+    // Create a new UDP socket for communication with the destination.
+    // Use dual-stack socket creation.
+    let destination_socket = create_dual_stack_udp_socket(local_bind_addr_for_destination).await?;
+
     info!(
         "Bound destination socket to: {:?}",
         destination_socket.local_addr()?
     );
-    let destination_socket = Arc::new(tokio::net::UdpSocket::from_std(destination_socket)?);
+    let destination_socket = Arc::new(destination_socket);
 
     let destination_socket_clone = destination_socket.clone();
     let streamer_socket_clone = streamer_socket.clone();
-    let destination_addr = format!("{}:{}", destination_ip, destination_port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| {
-            error!(
-                "Failed to resolve destination address: {}:{}",
-                destination_ip, destination_port
-            );
-            "Failed to resolve destination address"
-        })?;
 
-    info!("Destination address resolved: {}", destination_addr); // Added logging
+    let parsed_ip = IpAddr::from_str(&destination_ip)?;
+    let normalized_ip = match parsed_ip {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            // If it’s an IPv4-mapped IPv6 like ::ffff:x.x.x.x, convert to real IPv4
+            if let Some(mapped_v4) = v6.to_ipv4() {
+                IpAddr::V4(mapped_v4)
+            } else {
+                // Otherwise, keep it as IPv6
+                IpAddr::V6(v6)
+            }
+        }
+    };
+    let destination_addr = SocketAddr::new(normalized_ip, destination_port);
+    info!("Destination address resolved: {}", destination_addr);
 
     // Use an Arc<Mutex> to share the server_remote_addr between tasks.
     let server_remote_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
