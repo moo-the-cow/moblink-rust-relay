@@ -23,6 +23,9 @@ Originally inspired by the Moblink Kotlin/Android code, this Rust version has be
 git clone https://github.com/datagutt/moblink-rust-relay.git
 cd moblink-rust-relay
 
+# Set nightly (optional)
+rustup override set nightly
+
 # 2. Build the project
 cargo build --release
 
