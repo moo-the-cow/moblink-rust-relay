@@ -107,14 +107,13 @@ impl Relay {
         self.password = password;
         self.name = name;
         info!("Binding to address: {:?}", self.bind_address);
-        self.update_status_internal().await;
     }
 
     pub async fn start(relay_arc: Arc<Mutex<Self>>) {
         let mut relay = relay_arc.lock().await;
         if !relay.started {
             relay.started = true;
-            drop(relay); // Explicitly drop the lock before calling `start_internal`
+            drop(relay);
             Self::start_internal(relay_arc.clone()).await;
         }
     }
@@ -148,10 +147,12 @@ impl Relay {
         let password: String;
         let name: String;
         let get_battery_percentage: Option<Arc<dyn Fn(Box<dyn FnOnce(i32)>) + Send + Sync>>;
-        // Clone the `Arc` for use in the task
         {
             let mut relay = relay_arc.lock().await;
-            relay.stop_internal().await;
+            if !relay.started {
+                relay.stop_internal().await;
+                return;
+            }
 
             relay_id = relay.relay_id.clone();
             streamer_url = relay.streamer_url.clone();
@@ -502,6 +503,7 @@ fn parse_socket_addr(addr_str: &str) -> Result<SocketAddr, std::io::Error> {
         "Invalid socket address syntax. Expected 'IP:port' or 'IP'.",
     ))
 }
+
 async fn handle_start_tunnel_request(
     relay_arc: Arc<Mutex<Relay>>,
     ws_in: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
@@ -558,7 +560,7 @@ async fn handle_start_tunnel_request(
         let mut locked_ws_in = ws_in.lock().await;
         info!("Sending start tunnel response: {}", text);
         locked_ws_in.send(Message::Text(text.into())).await?;
-    } // Mutex lock is released here
+    }
 
     // Use an Arc<Mutex> to share the server_remote_addr between tasks.
     let server_remote_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
@@ -576,23 +578,19 @@ async fn handle_start_tunnel_request(
                 )
                 .await
                 {
-                    Ok(result) => {
-                        match result {
-                            Ok((size, addr)) => (size, addr),
-                            Err(e) => {
-                                error!("(relay_to_destination) Error receiving from server: {}", e);
-                                continue; // Continue to the next iteration
-                                          // after error
-                            }
+                    Ok(result) => match result {
+                        Ok((size, addr)) => (size, addr),
+                        Err(e) => {
+                            error!("(relay_to_destination) Error receiving from server: {}", e);
+                            continue;
                         }
-                    }
+                    },
                     Err(e) => {
                         error!(
                             "(relay_to_destination) Timeout receiving from server: {}",
                             e
                         );
-                        continue; // Continue to the next iteration after
-                                  // timeout
+                        continue;
                     }
                 };
 
