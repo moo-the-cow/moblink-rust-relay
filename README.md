@@ -2,14 +2,13 @@
 
 Use spare devices as extra SRTLA bonding connections. The same functionality is part of [Moblin](https://github.com/eerimoq/moblin) on iOS.
 
-Originally inspired by the Moblink Kotlin/Android code, this Rust version has been adapted to **up to two local IP addresses** if needed.
+Originally inspired by the Moblink Kotlin/Android code.
 
 ## Features
 
 - **WebSocket Connection**: Connects to Moblin via WebSocket (e.g., `wss://...`)  
 - **Auth Handling**: Implements the same challenge–response authentication logic as the Android client  
 - **UDP Relay**: Forwards UDP packets between the remote streamer and a local destination.  
-- **Multiple Bind Addresses**: Choose up to two local IPs to bind for the relay sockets (optional).  
 
 ## Requirements
 
