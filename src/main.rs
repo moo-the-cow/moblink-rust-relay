@@ -32,9 +32,9 @@ struct Args {
     #[arg(short, long)]
     password: String,
 
-    /// Bind addresses
-    #[arg(short, long = "bind-address", num_args = 0..2)]
-    bind_addresses: Vec<String>,
+    /// Bind address
+    #[arg(short, long = "bind-address", default_value_t = String::new())]
+    bind_address: String,
 
     /// Log level
     #[arg(short, long, default_value = "info")]
@@ -53,8 +53,8 @@ async fn main() {
     // Call setup on the wrapped Relay
     {
         let mut relay_lock = relay.lock().await;
-        if args.bind_addresses.len() > 0 {
-            relay_lock.set_bind_addresses(args.bind_addresses);
+        if !args.bind_address.is_empty() {
+            relay_lock.set_bind_address(args.bind_address);
         }
         // If a UUID is not provided, generate a new one
         let id = if args.id.is_empty() {

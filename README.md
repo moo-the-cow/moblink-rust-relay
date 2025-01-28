@@ -35,8 +35,7 @@ cargo build --release
   --id "UUID" \
   --streamer-url ws://192.168.1.2:7777 \
   --password "secret123" \
-  --bind-address 192.168.1.10 \
-  --bind-address 10.0.0.5 \
+  --bind-address 192.168.1.10
   --log-level debug
 ```
 
@@ -49,16 +48,12 @@ cargo build --release
 | `--streamer-url` | WebSocket URL to connect to the streamer                                      | _None_        | `--streamer-url wss://example.com/ws`       |
 | `--password`     | Password used in the challenge–response authentication                        | _None_        | `--password mySecret`                       |
 | `--log-level`    | Logging verbosity (e.g., error, warn, info, debug, trace)                    | `info`        | `--log-level debug`                         |
-| `--bind-address` | Local IP address(es) to bind for UDP sockets (can pass multiple)              | `0.0.0.0`     | `--bind-address 192.168.1.10` (repeatable)  |
+| `--bind-address` | Local IP address to bind for UDP socket                                      | `0.0.0.0`     | `--bind-address 192.168.1.10`  |
 
-### Multiple Bind Addresses
+### Bind to multiple addresses/interface
 
-If you provide **two or less** `--bind-address` arguments:
-
-- The **first** address is used for the streamer-facing UDP socket.  
-- The **second** address is used for the destination-facing UDP socket.  
-- If you provide only one bind address, it’s used for both sockets.  
-- If you omit `--bind-address`, it attempts to bind to your main network address.
+We no longer support binding to multiple addresses.
+Please start multiple instances of the relay for each interface.
 
 ## Architecture
 
@@ -67,13 +62,11 @@ If you provide **two or less** `--bind-address` arguments:
    - Handles “Hello” messages, calculates authentication, and sends an “Identify” message.
 
 2. **Handling Requests**  
-   - When a `startTunnel` request is received, the relay spawns two async tasks:  
-     - **(relay_to_destination)**: Forwards traffic from streamer → destination  
-     - **(relay_to_streamer)**: Forwards traffic from destination → streamer  
+   - When a `startTunnel` request is received, the relay spawns a task:
+     - **(relay_to_destination)**: Forwards traffic from relay → destination
 
 3. **UDP Binding**  
-   - By default, it binds two ephemeral UDP sockets.  
-   - **Multi-address mode**: If the user specifies multiple local IPs, each socket is bound to a distinct IP.
+   - By default, it binds a UDP socket to whatever we deem to be the main network interface.
 
 4. **Battery/Status**  
    - For demonstration, a battery percentage callback is shown. This can be replaced with actual device stats.
@@ -82,6 +75,9 @@ If you provide **two or less** `--bind-address` arguments:
 
 **Q:** How do I integrate this into my own application?  
 **A:** You can copy the `relay.rs` and `protocol.rs` modules and adapt them. The `main.rs` file shows a simple CLI usage example.
+
+**Q:** Why isn't this published as a crate?
+**A:** I will get around to it, I promise.
 
 ---
 

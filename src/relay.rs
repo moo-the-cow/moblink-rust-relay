@@ -20,8 +20,8 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use crate::protocol::*;
 
 pub struct Relay {
-    /// Store one or more local IP addresses for binding UDP sockets
-    pub bind_addresses: Vec<String>,
+    /// Store a local IP address  for binding UDP sockets
+    bind_address: String,
     relay_id: String,
     streamer_url: String,
     password: String,
@@ -38,7 +38,7 @@ pub struct Relay {
 impl Relay {
     pub fn new() -> Self {
         Self {
-            bind_addresses: Self::get_default_bind_addresses(),
+            bind_address: Self::get_default_bind_address(),
             relay_id: "".to_string(),
             streamer_url: "".to_string(),
             password: "".to_string(),
@@ -52,7 +52,7 @@ impl Relay {
         }
     }
 
-    fn get_default_bind_addresses() -> Vec<String> {
+    fn get_default_bind_address() -> String {
         // Get main network interface
         let interfaces = pnet::datalink::interfaces();
         let interface = interfaces.iter().find(|interface| {
@@ -76,13 +76,16 @@ impl Relay {
             })
             .collect();
 
-        // Return the first 2 addresses
-        ipv4_addresses.into_iter().take(2).collect()
+        // Return the first address
+        ipv4_addresses
+            .get(0)
+            .cloned()
+            .unwrap_or_else(|| "0.0.0.0:0".to_string())
     }
 
     #[allow(dead_code)]
-    pub fn set_bind_addresses(&mut self, addresses: Vec<String>) {
-        self.bind_addresses = addresses;
+    pub fn set_bind_address(&mut self, address: String) {
+        self.bind_address = address;
     }
 
     pub async fn setup<F, G>(
@@ -103,8 +106,7 @@ impl Relay {
         self.streamer_url = streamer_url;
         self.password = password;
         self.name = name;
-        // print bind addresses
-        info!("Bind addresses: {:?}", self.bind_addresses);
+        info!("Binding to address: {:?}", self.bind_address);
         self.update_status_internal().await;
     }
 
@@ -507,56 +509,11 @@ async fn handle_start_tunnel_request(
     destination_ip: String,
     destination_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Pick bind addresses from the relay
-    let (local_bind_addr_for_streamer, local_bind_addr_for_destination) = {
-        let relay = relay_arc.lock().await;
+    // Pick bind address from the relay
+    let relay = relay_arc.lock().await;
 
-        // If user gave at least 1 address, use it for streamer
-        let first_addr = relay
-            .bind_addresses
-            .get(0)
-            .cloned()
-            .unwrap_or_else(|| "0.0.0.0:0".to_string()); // Add port 0
-
-        // If user gave >=2 addresses, use the second for destination
-        let second_addr = relay
-            .bind_addresses
-            .get(1)
-            .cloned()
-            .unwrap_or_else(|| first_addr.clone());
-        (
-            parse_socket_addr(&first_addr)?,
-            parse_socket_addr(&second_addr)?,
-        )
-    };
-
-    info!(
-        "Binding streamer socket on: {}, destination socket on: {}",
-        local_bind_addr_for_streamer, local_bind_addr_for_destination
-    );
-    // Create a UDP socket bound for receiving packets from the server.
-    // Use dual-stack socket creation.
-    let streamer_socket = create_dual_stack_udp_socket(local_bind_addr_for_streamer).await?;
-    let streamer_port = streamer_socket.local_addr()?.port();
-    info!("Listening on UDP port: {}", streamer_port);
-    let streamer_socket = Arc::new(streamer_socket);
-
-    // Inform the server about the chosen port.
-    let data = ResponseData::StartTunnel(StartTunnelResponseData {
-        port: streamer_port,
-    });
-    let response = MessageResponse {
-        id: request_id,
-        result: MoblinkResult::Ok(Present {}),
-        data,
-    };
-    let message = MessageToStreamer::Response(response);
-    let text = serde_json::to_string(&message)?;
-    {
-        let mut locked_ws_in = ws_in.lock().await;
-        info!("Sending start tunnel response: {}", text);
-        locked_ws_in.send(Message::Text(text.into())).await?;
-    } // Mutex lock is released here
+    let bind_address = relay.bind_address.clone();
+    let local_bind_addr_for_destination = parse_socket_addr(&bind_address)?;
 
     // Create a new UDP socket for communication with the destination.
     // Use dual-stack socket creation.
@@ -569,7 +526,6 @@ async fn handle_start_tunnel_request(
     let destination_socket = Arc::new(destination_socket);
 
     let destination_socket_clone = destination_socket.clone();
-    let streamer_socket_clone = streamer_socket.clone();
 
     let parsed_ip = IpAddr::from_str(&destination_ip)?;
     let normalized_ip = match parsed_ip {
@@ -587,6 +543,23 @@ async fn handle_start_tunnel_request(
     let destination_addr = SocketAddr::new(normalized_ip, destination_port);
     info!("Destination address resolved: {}", destination_addr);
 
+    // Inform the server about the chosen port.
+    let data = ResponseData::StartTunnel(StartTunnelResponseData {
+        port: destination_port,
+    });
+    let response = MessageResponse {
+        id: request_id,
+        result: MoblinkResult::Ok(Present {}),
+        data,
+    };
+    let message = MessageToStreamer::Response(response);
+    let text = serde_json::to_string(&message)?;
+    {
+        let mut locked_ws_in = ws_in.lock().await;
+        info!("Sending start tunnel response: {}", text);
+        locked_ws_in.send(Message::Text(text.into())).await?;
+    } // Mutex lock is released here
+
     // Use an Arc<Mutex> to share the server_remote_addr between tasks.
     let server_remote_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
@@ -599,7 +572,7 @@ async fn handle_start_tunnel_request(
                 let mut buf = [0; 2048];
                 let (size, remote_addr) = match tokio::time::timeout(
                     Duration::from_secs(30),
-                    streamer_socket_clone.recv_from(&mut buf),
+                    destination_socket_clone.recv_from(&mut buf),
                 )
                 .await
                 {
@@ -660,68 +633,6 @@ async fn handle_start_tunnel_request(
             info!("(relay_to_destination) Task exiting");
         })
     };
-    // Relay packets from destination to streamer.
-    let relay_to_streamer = {
-        let server_remote_addr_clone = server_remote_addr.clone();
-        tokio::spawn(async move {
-            debug!("(relay_to_streamer) Task started");
-            loop {
-                let mut buf = [0; 2048];
-                let (size, remote_addr) = match tokio::time::timeout(
-                    Duration::from_secs(30),
-                    destination_socket.recv_from(&mut buf),
-                )
-                .await
-                {
-                    Ok(result) => {
-                        match result {
-                            Ok((size, addr)) => (size, addr),
-                            Err(e) => {
-                                error!(
-                                    "(relay_to_streamer) Error receiving from destination: {}",
-                                    e
-                                );
-                                continue; // Continue to the next iteration
-                                          // after error
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "(relay_to_streamer) Timeout receiving from destination: {}",
-                            e
-                        );
-                        continue; // Continue to the next iteration after
-                                  // timeout
-                    }
-                };
-
-                debug!(
-                    "(relay_to_streamer) Received {} bytes from destination: {}",
-                    size, remote_addr
-                );
-                // Forward to server.
-                let server_remote_addr_lock = server_remote_addr_clone.lock().await;
-                match *server_remote_addr_lock {
-                    Some(server_addr) => {
-                        match streamer_socket.send_to(&buf[..size], &server_addr).await {
-                            Ok(bytes_sent) => {
-                                debug!("(relay_to_streamer) Sent {} bytes to server", bytes_sent)
-                            }
-                            Err(e) => {
-                                error!("(relay_to_streamer) Failed to send to server: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    None => {
-                        error!("(relay_to_streamer) Server address not set, cannot forward packet");
-                    }
-                }
-            }
-            info!("(relay_to_streamer) Task exiting");
-        })
-    };
 
     // Wait for relay tasks to complete (they won't unless an error occurs or the
     // socket is closed).
@@ -729,11 +640,6 @@ async fn handle_start_tunnel_request(
         res = relay_to_destination => {
             if let Err(e) = res {
                 error!("relay_to_destination task failed: {}", e);
-            }
-        }
-        res = relay_to_streamer => {
-            if let Err(e) = res {
-                error!("relay_to_streamer task failed: {}", e);
             }
         }
     }
