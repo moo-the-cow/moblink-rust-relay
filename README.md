@@ -61,8 +61,9 @@ Please start multiple instances of the relay for each interface.
    - Handles “Hello” messages, calculates authentication, and sends an “Identify” message.
 
 2. **Handling Requests**  
-   - When a `startTunnel` request is received, the relay spawns a task:
-     - **(relay_to_destination)**: Forwards traffic from relay → destination
+   - When a `startTunnel` request is received, the relay spawns two async tasks:  
+     - **(relay_to_destination)**: Forwards traffic from streamer → destination  
+     - **(relay_to_streamer)**: Forwards traffic from destination → streamer  
 
 3. **UDP Binding**  
    - By default, it binds a UDP socket to whatever we deem to be the main network interface.
