@@ -20,8 +20,8 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use crate::protocol::*;
 
 pub struct Relay {
-    /// Store one or more local IP addresses for binding UDP sockets
-    pub bind_addresses: Vec<String>,
+    /// Store a local IP address  for binding UDP sockets
+    bind_address: String,
     relay_id: String,
     streamer_url: String,
     password: String,
@@ -38,7 +38,7 @@ pub struct Relay {
 impl Relay {
     pub fn new() -> Self {
         Self {
-            bind_addresses: Self::get_default_bind_addresses(),
+            bind_address: Self::get_default_bind_address(),
             relay_id: "".to_string(),
             streamer_url: "".to_string(),
             password: "".to_string(),
@@ -52,7 +52,7 @@ impl Relay {
         }
     }
 
-    fn get_default_bind_addresses() -> Vec<String> {
+    fn get_default_bind_address() -> String {
         // Get main network interface
         let interfaces = pnet::datalink::interfaces();
         let interface = interfaces.iter().find(|interface| {
@@ -76,13 +76,16 @@ impl Relay {
             })
             .collect();
 
-        // Return the first 2 addresses
-        ipv4_addresses.into_iter().take(2).collect()
+        // Return the first address
+        ipv4_addresses
+            .get(0)
+            .cloned()
+            .unwrap_or_else(|| "0.0.0.0:0".to_string())
     }
 
     #[allow(dead_code)]
-    pub fn set_bind_addresses(&mut self, addresses: Vec<String>) {
-        self.bind_addresses = addresses;
+    pub fn set_bind_address(&mut self, address: String) {
+        self.bind_address = address;
     }
 
     pub async fn setup<F, G>(
@@ -103,16 +106,14 @@ impl Relay {
         self.streamer_url = streamer_url;
         self.password = password;
         self.name = name;
-        // print bind addresses
-        info!("Bind addresses: {:?}", self.bind_addresses);
-        self.update_status_internal().await;
+        info!("Binding to address: {:?}", self.bind_address);
     }
 
     pub async fn start(relay_arc: Arc<Mutex<Self>>) {
         let mut relay = relay_arc.lock().await;
         if !relay.started {
             relay.started = true;
-            drop(relay); // Explicitly drop the lock before calling `start_internal`
+            drop(relay);
             Self::start_internal(relay_arc.clone()).await;
         }
     }
@@ -146,10 +147,12 @@ impl Relay {
         let password: String;
         let name: String;
         let get_battery_percentage: Option<Arc<dyn Fn(Box<dyn FnOnce(i32)>) + Send + Sync>>;
-        // Clone the `Arc` for use in the task
         {
             let mut relay = relay_arc.lock().await;
-            relay.stop_internal().await;
+            if !relay.started {
+                relay.stop_internal().await;
+                return;
+            }
 
             relay_id = relay.relay_id.clone();
             streamer_url = relay.streamer_url.clone();
@@ -500,6 +503,7 @@ fn parse_socket_addr(addr_str: &str) -> Result<SocketAddr, std::io::Error> {
         "Invalid socket address syntax. Expected 'IP:port' or 'IP'.",
     ))
 }
+
 async fn handle_start_tunnel_request(
     relay_arc: Arc<Mutex<Relay>>,
     ws_in: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
@@ -510,24 +514,8 @@ async fn handle_start_tunnel_request(
     // Pick bind addresses from the relay
     let (local_bind_addr_for_streamer, local_bind_addr_for_destination) = {
         let relay = relay_arc.lock().await;
-
-        // If user gave at least 1 address, use it for streamer
-        let first_addr = relay
-            .bind_addresses
-            .get(0)
-            .cloned()
-            .unwrap_or_else(|| "0.0.0.0:0".to_string()); // Add port 0
-
-        // If user gave >=2 addresses, use the second for destination
-        let second_addr = relay
-            .bind_addresses
-            .get(1)
-            .cloned()
-            .unwrap_or_else(|| first_addr.clone());
-        (
-            parse_socket_addr(&first_addr)?,
-            parse_socket_addr(&second_addr)?,
-        )
+        let addr = relay.bind_address.clone();
+        (parse_socket_addr(&addr)?, parse_socket_addr(&addr)?)
     };
 
     info!(
@@ -556,7 +544,7 @@ async fn handle_start_tunnel_request(
         let mut locked_ws_in = ws_in.lock().await;
         info!("Sending start tunnel response: {}", text);
         locked_ws_in.send(Message::Text(text.into())).await?;
-    } // Mutex lock is released here
+    }
 
     // Create a new UDP socket for communication with the destination.
     // Use dual-stack socket creation.
@@ -603,23 +591,19 @@ async fn handle_start_tunnel_request(
                 )
                 .await
                 {
-                    Ok(result) => {
-                        match result {
-                            Ok((size, addr)) => (size, addr),
-                            Err(e) => {
-                                error!("(relay_to_destination) Error receiving from server: {}", e);
-                                continue; // Continue to the next iteration
-                                          // after error
-                            }
+                    Ok(result) => match result {
+                        Ok((size, addr)) => (size, addr),
+                        Err(e) => {
+                            error!("(relay_to_destination) Error receiving from server: {}", e);
+                            continue;
                         }
-                    }
+                    },
                     Err(e) => {
                         error!(
                             "(relay_to_destination) Timeout receiving from server: {}",
                             e
                         );
-                        continue; // Continue to the next iteration after
-                                  // timeout
+                        continue;
                     }
                 };
 
@@ -673,26 +657,22 @@ async fn handle_start_tunnel_request(
                 )
                 .await
                 {
-                    Ok(result) => {
-                        match result {
-                            Ok((size, addr)) => (size, addr),
-                            Err(e) => {
-                                error!(
-                                    "(relay_to_streamer) Error receiving from destination: {}",
-                                    e
-                                );
-                                continue; // Continue to the next iteration
-                                          // after error
-                            }
+                    Ok(result) => match result {
+                        Ok((size, addr)) => (size, addr),
+                        Err(e) => {
+                            error!(
+                                "(relay_to_streamer) Error receiving from destination: {}",
+                                e
+                            );
+                            continue;
                         }
-                    }
+                    },
                     Err(e) => {
                         error!(
                             "(relay_to_streamer) Timeout receiving from destination: {}",
                             e
                         );
-                        continue; // Continue to the next iteration after
-                                  // timeout
+                        continue;
                     }
                 };
 
