@@ -9,6 +9,7 @@ Originally inspired by the Moblink Kotlin/Android code.
 - **WebSocket Connection**: Connects to Moblin via WebSocket (e.g., `wss://...`)  
 - **Auth Handling**: Implements the same challenge–response authentication logic as the Android client  
 - **UDP Relay**: Forwards UDP packets between the remote streamer and a local destination.  
+- **mDNS**: Automatically connect to nearby Moblink devices.
 
 ## Requirements
 
@@ -44,7 +45,7 @@ cargo build --release
 |------------------|------------------------------------------------------------------------------|---------------|---------------------------------------------|
 | `--name`         | Name to identify the relay                                                    | `Relay`       | `--name CameraRelay1`                       |
 | `--id`           | UUID to identify the Relay                                                    | Generated     | `--id UUID`                                 |
-| `--streamer-url` | WebSocket URL to connect to the streamer                                      | _None_        | `--streamer-url wss://example.com/ws`       |
+| `--streamer-url` | WebSocket URL to connect to the streamer                                      | _None_ (multicast DNS)        | `--streamer-url wss://example.com/ws`       |
 | `--password`     | Password used in the challenge–response authentication                        | _None_        | `--password mySecret`                       |
 | `--log-level`    | Logging verbosity (e.g., error, warn, info, debug, trace)                    | `info`        | `--log-level debug`                         |
 | `--bind-address` | Local IP address to bind for UDP socket                                      | `0.0.0.0`     | `--bind-address 192.168.1.10`  |
@@ -57,7 +58,7 @@ Please start multiple instances of the relay for each interface.
 ## Architecture
 
 1. **WebSocket Connection**  
-   - Establishes a WebSocket to `streamer_url`.  
+   - Establishes a WebSocket to `streamer_url`, or if not provided, tries to find nearby Moblink streamers through multicast DNS.
    - Handles “Hello” messages, calculates authentication, and sends an “Identify” message.
 
 2. **Handling Requests**  
