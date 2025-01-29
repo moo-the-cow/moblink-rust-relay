@@ -109,6 +109,10 @@ impl Relay {
         info!("Binding to address: {:?}", self.bind_address);
     }
 
+    pub fn is_started(&self) -> bool {
+        self.started
+    }
+
     pub async fn start(relay_arc: Arc<Mutex<Self>>) {
         let mut relay = relay_arc.lock().await;
         if !relay.started {
