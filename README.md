@@ -43,12 +43,12 @@ cargo build --release
 
 | Argument         | Description                                                                  | Default       | Example                                     |
 |------------------|------------------------------------------------------------------------------|---------------|---------------------------------------------|
-| `--name`         | Name to identify the relay                                                    | `Relay`       | `--name CameraRelay1`                       |
-| `--id`           | UUID to identify the Relay                                                    | Generated     | `--id UUID`                                 |
-| `--streamer-url` | WebSocket URL to connect to the streamer                                      | _None_ (multicast DNS)        | `--streamer-url wss://example.com/ws`       |
-| `--password`     | Password used in the challenge–response authentication                        | _None_        | `--password mySecret`                       |
+| `--name`         | Name to identify the relay                                                   | `Relay`       | `--name CameraRelay1`                       |
+| `--id`           | UUID to identify the Relay                                                   | Generated     | `--id UUID`                                 |
+| `--streamer-url` | WebSocket URL to connect to the streamer                                     | _None_ (multicast DNS)        | `--streamer-url wss://example.com/ws`       |
+| `--password`     | Password used in the challenge–response authentication                       | _None_        | `--password mySecret`                       |
 | `--log-level`    | Logging verbosity (e.g., error, warn, info, debug, trace)                    | `info`        | `--log-level debug`                         |
-| `--bind-address` | Local IP address to bind for UDP socket                                      | `0.0.0.0`     | `--bind-address 192.168.1.10`  |
+| `--bind-address` | Local modem IP address to bind for UDP socket                                | `0.0.0.0`     | `--bind-address 192.168.1.10`               |
 
 ### Bind to multiple addresses/interface
 

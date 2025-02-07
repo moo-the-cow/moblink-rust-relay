@@ -519,7 +519,7 @@ async fn handle_start_tunnel_request(
     let (local_bind_addr_for_streamer, local_bind_addr_for_destination) = {
         let relay = relay_arc.lock().await;
         let addr = relay.bind_address.clone();
-        (parse_socket_addr(&addr)?, parse_socket_addr(&addr)?)
+        (parse_socket_addr("0.0.0.0")?, parse_socket_addr(&addr)?)
     };
 
     info!(
