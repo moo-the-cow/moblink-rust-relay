@@ -2,12 +2,14 @@ mod protocol;
 mod relay;
 
 use std::io::Write;
+use tokio::{fs::File, io::AsyncReadExt, process::Command};
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
+use relay::GetStatusClosure;
 use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
@@ -36,6 +38,16 @@ struct Args {
     /// Log level
     #[arg(short, long, default_value = "info")]
     log_level: String,
+
+    /// Status executable.
+    /// Print status to standard output on format {"batteryPercentage": 93}.
+    #[arg(long)]
+    status_executable: Option<String>,
+
+    /// Status file.
+    /// Contains status on format {"batteryPercentage": 93}.
+    #[arg(long)]
+    status_file: Option<String>,
 }
 
 fn setup_logging(log_level: Option<String>) {
@@ -58,6 +70,47 @@ fn setup_logging(log_level: Option<String>) {
     log_cfg.init();
 }
 
+fn create_get_status_closure(
+    status_executable: &Option<String>,
+    status_file: &Option<String>,
+) -> GetStatusClosure {
+    let status_executable = status_executable.clone();
+    let status_file = status_file.clone();
+    Box::new(move || {
+        let status_executable = status_executable.clone();
+        let status_file = status_file.clone();
+        Box::pin(async move {
+            let output = if let Some(status_executable) = &status_executable {
+                let Ok(output) = Command::new(status_executable).output().await else {
+                    return Default::default();
+                };
+                output.stdout
+            } else if let Some(status_file) = &status_file {
+                let Ok(mut file) = File::open(status_file).await else {
+                    return Default::default();
+                };
+                let mut contents = vec![];
+                if file.read_to_end(&mut contents).await.is_err() {
+                    return Default::default();
+                }   
+                contents
+            } else {
+                return Default::default();
+            };
+            let Ok(output) = String::from_utf8(output) else {
+                return Default::default();
+            };
+            match serde_json::from_str(&output) {
+                Ok(status) => status,
+                Err(e) => {
+                    error!("Failed to decode status with error: {e}");
+                    Default::default()
+                }
+            }
+        })
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -74,6 +127,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let streamer_url_clone = args.streamer_url.clone();
     let bind_address_clone = args.bind_address.clone();
+
+    let status_executable = args.status_executable.clone();
+    let status_file = args.status_file.clone();
 
     let mdns_task = tokio::spawn(async move {
         let mut retries = 0;
@@ -131,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         relay_id.clone().to_string(),
                                         name.clone(),
                                         |status| info!("Status: {}", status),
-                                        |callback| callback(None),
+                                        create_get_status_closure(&status_executable, &status_file),
                                     )
                                     .await;
                             }
@@ -177,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     relay_id_clone.to_string(),
                     args.name,
                     |status| info!("Status: {}", status),
-                    |callback| callback(None),
+                    create_get_status_closure(&args.status_executable, &args.status_file),
                 )
                 .await;
         }
