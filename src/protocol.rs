@@ -55,8 +55,9 @@ pub struct StartTunnelResponseData {
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub enum StatusResponseData {
-    BatteryPercentage(i32),
+pub struct StatusResponseData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub battery_percentage: Option<i32>,
 }
 
 #[derive(Serialize, Debug)]

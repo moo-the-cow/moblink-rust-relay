@@ -28,7 +28,7 @@ pub struct Relay {
     name: String,
     on_status_updated: Option<Box<dyn Fn(String) + Send + Sync>>,
     #[allow(clippy::type_complexity)]
-    get_battery_percentage: Option<Arc<dyn Fn(Box<dyn FnOnce(i32)>) + Send + Sync>>,
+    get_battery_percentage: Option<Arc<dyn Fn(Box<dyn FnOnce(Option<i32>)>) + Send + Sync>>,
     ws_in: Option<Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>>,
     started: bool,
     connected: bool,
@@ -98,7 +98,7 @@ impl Relay {
         get_battery_percentage: G,
     ) where
         F: Fn(String) + Send + Sync + 'static,
-        G: Fn(Box<dyn FnOnce(i32)>) + Send + Sync + 'static,
+        G: Fn(Box<dyn FnOnce(Option<i32>)>) + Send + Sync + 'static,
     {
         self.on_status_updated = Some(Box::new(on_status_updated));
         self.get_battery_percentage = Some(Arc::new(get_battery_percentage));
@@ -150,7 +150,9 @@ impl Relay {
         let streamer_url: String;
         let password: String;
         let name: String;
-        let get_battery_percentage: Option<Arc<dyn Fn(Box<dyn FnOnce(i32)>) + Send + Sync>>;
+        let get_battery_percentage: Option<
+            Arc<dyn Fn(Box<dyn FnOnce(Option<i32>)>) + Send + Sync>,
+        >;
         {
             let mut relay = relay_arc.lock().await;
             if !relay.started {
@@ -348,7 +350,7 @@ impl Relay {
         password: String,
         name: String,
         relay_id: String,
-        get_battery_percentage: Option<&(dyn Fn(Box<dyn FnOnce(i32)>) + Send + Sync)>,
+        get_battery_percentage: Option<&(dyn Fn(Box<dyn FnOnce(Option<i32>)>) + Send + Sync)>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match message {
             MessageToRelay::Hello(hello) => {
@@ -408,9 +410,8 @@ impl Relay {
                     if let Some(get_battery_percentage) = get_battery_percentage {
                         info!("Handling status request");
                         get_battery_percentage(Box::new(move |battery_percentage| {
-                            let data = ResponseData::Status(StatusResponseData::BatteryPercentage(
-                                battery_percentage,
-                            ));
+                            let data =
+                                ResponseData::Status(StatusResponseData { battery_percentage });
                             let response = MessageResponse {
                                 id: request.id,
                                 result: MoblinkResult::Ok(Present {}),

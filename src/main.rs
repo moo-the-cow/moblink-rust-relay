@@ -1,7 +1,6 @@
 mod protocol;
 mod relay;
 
-use std::env;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         relay_id.clone().to_string(),
                                         name.clone(),
                                         |status| info!("Status: {}", status),
-                                        |callback| callback(75),
+                                        |callback| callback(None),
                                     )
                                     .await;
                             }
@@ -178,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     relay_id_clone.to_string(),
                     args.name,
                     |status| info!("Status: {}", status),
-                    |callback| callback(75), // Battery callback
+                    |callback| callback(None),
                 )
                 .await;
         }
