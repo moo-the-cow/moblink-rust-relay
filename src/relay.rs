@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -19,6 +20,14 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use crate::protocol::*;
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub battery_percentage: Option<i32>,
+}
+
+pub type GetStatusClosure = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Status> + Send + Sync>> + Send + Sync>;
+
 pub struct Relay {
     /// Store a local IP address  for binding UDP sockets
     bind_address: String,
@@ -28,7 +37,7 @@ pub struct Relay {
     name: String,
     on_status_updated: Option<Box<dyn Fn(String) + Send + Sync>>,
     #[allow(clippy::type_complexity)]
-    get_battery_percentage: Option<Arc<dyn Fn(Box<dyn FnOnce(Option<i32>)>) + Send + Sync>>,
+    get_status: Option<Arc<GetStatusClosure>>,
     ws_in: Option<Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>>,
     started: bool,
     connected: bool,
@@ -44,7 +53,7 @@ impl Relay {
             password: "".to_string(),
             name: "".to_string(),
             on_status_updated: None,
-            get_battery_percentage: None,
+            get_status: None,
             ws_in: None,
             started: false,
             connected: false,
@@ -88,20 +97,19 @@ impl Relay {
         self.bind_address = address;
     }
 
-    pub async fn setup<F, G>(
+    pub async fn setup<F>(
         &mut self,
         streamer_url: String,
         password: String,
         relay_id: String,
         name: String,
         on_status_updated: F,
-        get_battery_percentage: G,
+        get_status: GetStatusClosure,
     ) where
         F: Fn(String) + Send + Sync + 'static,
-        G: Fn(Box<dyn FnOnce(Option<i32>)>) + Send + Sync + 'static,
     {
         self.on_status_updated = Some(Box::new(on_status_updated));
-        self.get_battery_percentage = Some(Arc::new(get_battery_percentage));
+        self.get_status = Some(Arc::new(get_status));
         self.relay_id = relay_id;
         self.streamer_url = streamer_url;
         self.password = password;
@@ -150,9 +158,7 @@ impl Relay {
         let streamer_url: String;
         let password: String;
         let name: String;
-        let get_battery_percentage: Option<
-            Arc<dyn Fn(Box<dyn FnOnce(Option<i32>)>) + Send + Sync>,
-        >;
+        let get_status: Option<Arc<GetStatusClosure>>;
         {
             let mut relay = relay_arc.lock().await;
             if !relay.started {
@@ -164,7 +170,7 @@ impl Relay {
             streamer_url = relay.streamer_url.clone();
             password = relay.password.clone();
             name = relay.name.clone();
-            get_battery_percentage = relay.get_battery_percentage.clone();
+            get_status = relay.get_status.clone();
 
             if !relay.started {
                 return;
@@ -243,7 +249,7 @@ impl Relay {
                                         password.clone(),
                                         name.clone(),
                                         relay_id.clone(),
-                                        get_battery_percentage.as_deref(),
+                                        get_status.clone(),
                                     )
                                     .await
                                     {
@@ -350,7 +356,7 @@ impl Relay {
         password: String,
         name: String,
         relay_id: String,
-        get_battery_percentage: Option<&(dyn Fn(Box<dyn FnOnce(Option<i32>)>) + Send + Sync)>,
+        get_status: Option<Arc<GetStatusClosure>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match message {
             MessageToRelay::Hello(hello) => {
@@ -407,41 +413,39 @@ impl Relay {
                     Ok(())
                 }
                 MessageRequestData::Status(_) => {
-                    if let Some(get_battery_percentage) = get_battery_percentage {
-                        info!("Handling status request");
-                        get_battery_percentage(Box::new(move |battery_percentage| {
-                            let data =
-                                ResponseData::Status(StatusResponseData { battery_percentage });
-                            let response = MessageResponse {
-                                id: request.id,
-                                result: MoblinkResult::Ok(Present {}),
-                                data,
-                            };
-                            let message = MessageToStreamer::Response(response);
-                            let text = serde_json::to_string(&message);
-
-                            if let Err(e) = text {
-                                error!("Failed to serialize status response: {}", e);
-                                return;
-                            }
-
-                            if let Ok(text) = text {
-                                log::info!("Sending status response: {}", text);
-                                let cloned_ws_in = ws_in.clone();
-                                tokio::spawn(async move {
-                                    let mut locked_ws_in = cloned_ws_in.lock().await;
-                                    match locked_ws_in.send(Message::Text(text.into())).await {
-                                        Ok(_) => info!("Status response sent successfully."),
-                                        Err(e) => error!("Failed to send status response: {}", e),
-                                    }
-                                });
-                            }
-                        }));
-                        Ok(())
-                    } else {
+                    let Some(get_status) = get_status else {
                         error!("get_battery_percentage is not set");
-                        Err("get_battery_percentage function not set".into())
+                        return Err("get_battery_percentage function not set".into());
+                    };
+                    info!("Handling status request");
+                    let status = get_status().await;
+                    let data = ResponseData::Status(StatusResponseData {
+                        battery_percentage: status.battery_percentage,
+                    });
+                    let response = MessageResponse {
+                        id: request.id,
+                        result: MoblinkResult::Ok(Present {}),
+                        data,
+                    };
+                    let message = MessageToStreamer::Response(response);
+                    let text = serde_json::to_string(&message);
+
+                    if let Err(e) = text {
+                        error!("Failed to serialize status response: {e}");
+                        return Err(format!("Failed to serialize status response: {e}").into());
                     }
+                    if let Ok(text) = text {
+                        log::info!("Sending status response: {}", text);
+                        let cloned_ws_in = ws_in.clone();
+                        tokio::spawn(async move {
+                            let mut locked_ws_in = cloned_ws_in.lock().await;
+                            match locked_ws_in.send(Message::Text(text.into())).await {
+                                Ok(_) => info!("Status response sent successfully."),
+                                Err(e) => error!("Failed to send status response: {}", e),
+                            }
+                        });
+                    }
+                    Ok(())
                 }
             },
         }
