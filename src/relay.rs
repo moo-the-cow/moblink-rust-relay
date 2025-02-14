@@ -26,7 +26,8 @@ pub struct Status {
     pub battery_percentage: Option<i32>,
 }
 
-pub type GetStatusClosure = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Status> + Send + Sync>> + Send + Sync>;
+pub type GetStatusClosure =
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = Status> + Send + Sync>> + Send + Sync>;
 
 pub struct Relay {
     /// Store a local IP address  for binding UDP sockets
