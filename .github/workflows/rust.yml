@@ -1,6 +1,8 @@
 name: Rust
 
 on:
+  release:
+    types: [created]
   push:
     branches: [ "main" ]
   pull_request:
@@ -20,6 +22,22 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
-    - name: Release
+  release:
+    name: release ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-gnu, x86_64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@master
+      - name: Compile and release
+        uses: rust-build/rust-build.action@v1.4.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          RUSTTARGET: ${{ matrix.target }}
+          #EXTRA_FILES: "README.md LICENSE"
+    #- name: Release
       #run: rustup target add aarch64-unknown-linux-musl && cargo build --target=aarch64-unknown-linux-musl
-      run: rustup default stable && cargo build --release
+      #run: rustup default stable && cargo build --release
