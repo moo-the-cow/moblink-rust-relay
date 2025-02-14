@@ -31,6 +31,7 @@ jobs:
       with:
         name: moblink-rust-relay-linux_x86_64
         path: releases/linux_x86_64/moblink-rust-relay
+        retention-days: 1  # Store the artifact temporarily
 
   build_linux_arm64:
     runs-on: [self-hosted, linux, ARM64]
@@ -51,10 +52,11 @@ jobs:
       with:
         name: moblink-rust-relay-linux_arm64
         path: releases/linux_arm64/moblink-rust-relay
+        retention-days: 1  # Store the artifact temporarily
 
   commit_and_push:
     needs: [build_linux_x86_64, build_linux_arm64]  # Ensure this runs after both builds
-    runs-on: [self-hosted, linux, X64]
+    runs-on: [self-hosted, linux, X64]  # Can be any runner
 
     steps:
     - uses: actions/checkout@v4
