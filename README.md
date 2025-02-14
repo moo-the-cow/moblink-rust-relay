@@ -76,10 +76,7 @@ Please start multiple instances of the relay for each interface.
 ## FAQ
 
 **Q:** How do I integrate this into my own application?  
-**A:** You can copy the `relay.rs` and `protocol.rs` modules and adapt them. The `main.rs` file shows a simple CLI usage example.
-
-**Q:** Why isn't this published as a crate?
-**A:** I will get around to it, I promise.
+**A:** Use the moblink-rust [crate](https://crates.io/crates/moblink-rust)
 
 ---
 
