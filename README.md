@@ -49,6 +49,10 @@ cargo build --release
 | `--password`     | Password used in the challenge–response authentication                       | _None_        | `--password mySecret`                       |
 | `--log-level`    | Logging verbosity (e.g., error, warn, info, debug, trace)                    | `info`        | `--log-level debug`                         |
 | `--bind-address` | Local modem IP address to bind for UDP socket                                | `0.0.0.0`     | `--bind-address 192.168.1.10`               |
+| `--status-executable` | Status executable. Print status to standard output on format {"batteryPercentage": 93} | _None_ | `--status-executable ./status.sh`   |
+| `--status-file` | Status file. Contains status on format {"batteryPercentage": 93}              | _None_        | `--status-file status.json`                 |
+
+Relay status (today only battery percentage) is sent to the streamer if `--status-executable` or `--status-file` is given and outputting a valid JSON object as seen above.
 
 ### Bind to multiple addresses/interface
 
@@ -69,16 +73,10 @@ Please start multiple instances of the relay for each interface.
 3. **UDP Binding**  
    - By default, it binds a UDP socket to whatever we deem to be the main network interface.
 
-4. **Battery/Status**  
-   - For demonstration, a battery percentage callback is shown. This can be replaced with actual device stats.
-
 ## FAQ
 
 **Q:** How do I integrate this into my own application?  
-**A:** You can copy the `relay.rs` and `protocol.rs` modules and adapt them. The `main.rs` file shows a simple CLI usage example.
-
-**Q:** Why isn't this published as a crate?
-**A:** I will get around to it, I promise.
+**A:** Use the moblink-rust [crate](https://crates.io/crates/moblink-rust)
 
 ---
 
