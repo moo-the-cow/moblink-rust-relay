@@ -2,9 +2,9 @@ mod protocol;
 mod relay;
 
 use std::io::Write;
-use tokio::{fs::File, io::AsyncReadExt, process::Command};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::{fs::File, io::AsyncReadExt, process::Command};
 
 use clap::Parser;
 use log::{debug, error, info, warn};
@@ -92,7 +92,7 @@ fn create_get_status_closure(
                 let mut contents = vec![];
                 if file.read_to_end(&mut contents).await.is_err() {
                     return Default::default();
-                }   
+                }
                 contents
             } else {
                 return Default::default();
