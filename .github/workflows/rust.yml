@@ -21,4 +21,5 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
     - name: Release
-      run: rustup target add aarch64-unknown-linux-musl && cargo build --target=aarch64-unknown-linux-musl
+      #run: rustup target add aarch64-unknown-linux-musl && cargo build --target=aarch64-unknown-linux-musl
+      run: rustup target stable && cargo build --release
