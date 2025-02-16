@@ -1,5 +1,4 @@
-pub mod protocol;
+mod protocol;
 pub mod relay;
 
-pub use protocol::*;
 pub use relay::*;
