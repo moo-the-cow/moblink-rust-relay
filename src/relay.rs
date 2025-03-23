@@ -245,7 +245,7 @@ impl Relay {
 
     fn update_status(&self) {
         let Some(on_status_updated) = &self.on_status_updated else {
-           return;
+            return;
         };
         let status = if self.connected {
             "Connected to streamer"
