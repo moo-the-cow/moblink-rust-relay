@@ -2,7 +2,6 @@ mod protocol;
 mod relay;
 
 use std::io::Write;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::{fs::File, io::AsyncReadExt, process::Command};
 
@@ -117,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     setup_logging(Some(args.log_level.clone()));
 
     // Get or generate relay ID
-    let relay_id = Arc::new(args.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
+    let relay_id = args.id.unwrap_or(uuid::Uuid::new_v4().to_string());
     let relay_id_clone = relay_id.clone();
 
     // mDNS discovery task
@@ -182,7 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .setup(
                                     streamer_url,
                                     password.clone(),
-                                    relay_id.clone().to_string(),
+                                    relay_id_clone.clone(),
                                     name.clone(),
                                     |status| info!("Status: {}", status),
                                     create_get_status_closure(&status_executable, &status_file),
@@ -204,7 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let delay = Duration::from_secs(2u64.pow(retries));
             warn!("No streamers found, retrying in {:?}...", delay);
             tokio::time::sleep(delay).await;
-            retries = std::cmp::min(retries + 1, 5);
+            retries = (retries + 1).min(5);
         }
     });
 
@@ -217,16 +216,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(streamer_url) = args.streamer_url {
         let mut relay = relay.lock().await;
-        let bind_address_clone = args.bind_address.clone();
         // Handle network interface binding
-        if !bind_address_clone.is_empty() {
-            relay.set_bind_address(bind_address_clone);
+        if !args.bind_address.is_empty() {
+            relay.set_bind_address(args.bind_address);
         }
         relay
             .setup(
                 streamer_url,
                 args.password,
-                relay_id_clone.to_string(),
+                relay_id,
                 args.name,
                 |status| info!("Status: {}", status),
                 create_get_status_closure(&args.status_executable, &args.status_file),

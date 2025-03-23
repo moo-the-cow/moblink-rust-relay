@@ -37,7 +37,6 @@ pub struct Relay {
     password: String,
     name: String,
     on_status_updated: Option<Box<dyn Fn(String) + Send + Sync>>,
-    #[allow(clippy::type_complexity)]
     get_status: Option<Arc<GetStatusClosure>>,
     ws_writer: Option<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>,
     started: bool,
@@ -67,37 +66,6 @@ impl Relay {
                 start_on_reconnect_soon: Arc::new(Mutex::new(false)),
             })
         })
-    }
-
-    fn get_default_bind_address() -> String {
-        // Get main network interface
-        let interfaces = pnet::datalink::interfaces();
-        let interface = interfaces.iter().find(|interface| {
-            interface.is_up() && !interface.is_loopback() && !interface.ips.is_empty()
-        });
-
-        let interface = match interface {
-            Some(interface) => interface,
-            None => {
-                panic!("No available network interfaces found");
-            }
-        };
-
-        // Only ipv4 addresses are supported
-        let ipv4_addresses: Vec<String> = interface
-            .ips
-            .iter()
-            .filter_map(|ip| {
-                let ip = ip.ip();
-                ip.is_ipv4().then(|| ip.to_string())
-            })
-            .collect();
-
-        // Return the first address
-        ipv4_addresses
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "0.0.0.0:0".to_string())
     }
 
     #[allow(dead_code)]
@@ -141,6 +109,31 @@ impl Relay {
             self.started = false;
             self.stop_internal().await;
         }
+    }
+
+    fn get_default_bind_address() -> String {
+        // Get main network interface
+        let interfaces = pnet::datalink::interfaces();
+        let interface = interfaces.iter().find(|interface| {
+            interface.is_up() && !interface.is_loopback() && !interface.ips.is_empty()
+        });
+
+        // Only ipv4 addresses are supported
+        let ipv4_addresses: Vec<String> = interface
+            .expect("No available network interfaces found")
+            .ips
+            .iter()
+            .filter_map(|ip| {
+                let ip = ip.ip();
+                ip.is_ipv4().then(|| ip.to_string())
+            })
+            .collect();
+
+        // Return the first address
+        ipv4_addresses
+            .first()
+            .cloned()
+            .unwrap_or("0.0.0.0:0".to_string())
     }
 
     async fn start_internal(&mut self) {
@@ -191,11 +184,12 @@ impl Relay {
             };
 
             while let Some(result) = reader.next().await {
+                let mut relay = relay_arc.lock().await;
                 match result {
                     Ok(message) => match message {
                         Message::Text(text) => {
                             if let Ok(message) = serde_json::from_str::<MessageToRelay>(&text) {
-                                relay_arc.lock().await.handle_message(message).await.ok();
+                                relay.handle_message(message).await.ok();
                             } else {
                                 error!("Failed to deserialize message: {}", text);
                             }
@@ -211,7 +205,7 @@ impl Relay {
                         }
                         Message::Close(frame) => {
                             info!("Received close message: {:?}", frame);
-                            relay_arc.lock().await.reconnect_soon().await;
+                            relay.reconnect_soon().await;
                             break;
                         }
                         Message::Frame(_) => {
@@ -224,7 +218,7 @@ impl Relay {
                         if e.to_string()
                             .contains("Connection reset without closing handshake")
                         {
-                            relay_arc.lock().await.reconnect_soon().await;
+                            relay.reconnect_soon().await;
                         }
                         break;
                     }
@@ -246,22 +240,23 @@ impl Relay {
         self.wrong_password = false;
         *self.reconnect_on_tunnel_error.lock().await = false;
         *self.start_on_reconnect_soon.lock().await = false;
-        self.update_status_internal();
+        self.update_status();
     }
 
-    fn update_status_internal(&self) {
-        let status = if self.connected {
-            "Connected to streamer".to_string()
-        } else if self.wrong_password {
-            "Wrong password".to_string()
-        } else if self.started {
-            "Connecting to streamer".to_string()
-        } else {
-            "Disconnected from streamer".to_string()
+    fn update_status(&self) {
+        let Some(on_status_updated) = &self.on_status_updated else {
+           return;
         };
-        if let Some(on_status_updated) = &self.on_status_updated {
-            on_status_updated(status);
-        }
+        let status = if self.connected {
+            "Connected to streamer"
+        } else if self.wrong_password {
+            "Wrong password"
+        } else if self.started {
+            "Connecting to streamer"
+        } else {
+            "Disconnected from streamer"
+        };
+        on_status_updated(status.to_string());
     }
 
     async fn reconnect_soon(&mut self) {
@@ -336,7 +331,7 @@ impl Relay {
                 self.wrong_password = true;
             }
         }
-        self.update_status_internal();
+        self.update_status();
         Ok(())
     }
 
@@ -458,18 +453,18 @@ impl Relay {
         info!("Destination address resolved: {}", destination_addr);
 
         // Use an Arc<Mutex> to share the server_remote_addr between tasks.
-        let server_remote_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+        let streamer_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
         let relay_to_destination = start_relay_from_streamer_to_destination(
             streamer_socket.clone(),
             destination_socket.clone(),
-            server_remote_addr.clone(),
+            streamer_addr.clone(),
             destination_addr,
         );
         let relay_to_streamer = start_relay_from_destination_to_streamer(
             streamer_socket,
             destination_socket,
-            server_remote_addr,
+            streamer_addr,
         );
 
         *self.reconnect_on_tunnel_error.lock().await = false;
