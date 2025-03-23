@@ -235,22 +235,21 @@ impl Relay {
 
     async fn stop_internal(&mut self) {
         info!("Stop internal");
-        if let Some(ws_writer) = self.ws_writer.as_mut() {
+        if let Some(mut ws_writer) = self.ws_writer.take() {
             if let Err(e) = ws_writer.close().await {
                 error!("Error closing WebSocket: {}", e);
             } else {
                 info!("WebSocket closed successfully");
             }
-            self.ws_writer = None;
         }
         self.connected = false;
         self.wrong_password = false;
         *self.reconnect_on_tunnel_error.lock().await = false;
         *self.start_on_reconnect_soon.lock().await = false;
-        self.update_status_internal().await;
+        self.update_status_internal();
     }
 
-    async fn update_status_internal(&self) {
+    fn update_status_internal(&self) {
         let status = if self.connected {
             "Connected to streamer".to_string()
         } else if self.wrong_password {
@@ -294,83 +293,105 @@ impl Relay {
         message: MessageToRelay,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match message {
-            MessageToRelay::Hello(hello) => {
-                let authentication = calculate_authentication(
-                    &self.password,
-                    &hello.authentication.salt,
-                    &hello.authentication.challenge,
-                );
-                let identify = Identify {
-                    id: self.relay_id.clone(),
-                    name: self.name.clone(),
-                    authentication,
-                };
-                let message = MessageToStreamer::Identify(identify);
-                let text = serde_json::to_string(&message)?;
-                let Some(writer) = self.ws_writer.as_mut() else {
-                    return Err("No writer".into());
-                };
-                writer.send(Message::Text(text.into())).await?;
-                Ok(())
-            }
+            MessageToRelay::Hello(hello) => self.handle_message_hello(hello).await,
             MessageToRelay::Identified(identified) => {
-                match identified.result {
-                    MoblinkResult::Ok(_) => {
-                        self.connected = true;
-                    }
-                    MoblinkResult::WrongPassword(_) => {
-                        self.wrong_password = true;
-                    }
-                }
-                self.update_status_internal().await;
-                Ok(())
+                self.handle_message_identified(identified).await
             }
-            MessageToRelay::Request(request) => match request.data {
-                MessageRequestData::StartTunnel(start_tunnel) => {
-                    info!("Received start tunnel request: {:?}", start_tunnel);
-                    match self
-                        .handle_start_tunnel_request(
-                            request.id,
-                            start_tunnel.address,
-                            start_tunnel.port,
-                        )
-                        .await
-                    {
-                        Ok(_) => info!("Start tunnel request handled successfully."),
-                        Err(e) => error!("Error handling start tunnel request: {}", e),
-                    };
-                    Ok(())
-                }
-                MessageRequestData::Status(_) => {
-                    let Some(get_status) = self.get_status.as_ref() else {
-                        error!("get_battery_percentage is not set");
-                        return Err("get_battery_percentage function not set".into());
-                    };
-                    let status = get_status().await;
-                    let data = ResponseData::Status(StatusResponseData {
-                        battery_percentage: status.battery_percentage,
-                    });
-                    let response = MessageResponse {
-                        id: request.id,
-                        result: MoblinkResult::Ok(Present {}),
-                        data,
-                    };
-                    match serde_json::to_string(&MessageToStreamer::Response(response)) {
-                        Ok(text) => {
-                            let Some(writer) = self.ws_writer.as_mut() else {
-                                return Err("No writer".into());
-                            };
-                            writer.send(Message::Text(text.into())).await.ok();
-                        }
-                        Err(e) => {
-                            error!("Failed to serialize status response: {e}");
-                            return Err(format!("Failed to serialize status response: {e}").into());
-                        }
-                    }
-                    Ok(())
-                }
-            },
+            MessageToRelay::Request(request) => self.handle_message_request(request).await,
         }
+    }
+
+    async fn handle_message_hello(
+        &mut self,
+        hello: Hello,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let authentication = calculate_authentication(
+            &self.password,
+            &hello.authentication.salt,
+            &hello.authentication.challenge,
+        );
+        let identify = Identify {
+            id: self.relay_id.clone(),
+            name: self.name.clone(),
+            authentication,
+        };
+        let message = MessageToStreamer::Identify(identify);
+        let text = serde_json::to_string(&message)?;
+        let Some(writer) = self.ws_writer.as_mut() else {
+            return Err("No writer".into());
+        };
+        writer.send(Message::Text(text.into())).await?;
+        Ok(())
+    }
+
+    async fn handle_message_identified(
+        &mut self,
+        identified: Identified,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match identified.result {
+            MoblinkResult::Ok(_) => {
+                self.connected = true;
+            }
+            MoblinkResult::WrongPassword(_) => {
+                self.wrong_password = true;
+            }
+        }
+        self.update_status_internal();
+        Ok(())
+    }
+
+    async fn handle_message_request(
+        &mut self,
+        request: MessageRequest,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match request.data {
+            MessageRequestData::StartTunnel(start_tunnel) => {
+                self.handle_message_request_start_tunnel(request.id, start_tunnel)
+                    .await
+            }
+            MessageRequestData::Status(_) => self.handle_message_request_status(request.id).await,
+        }
+    }
+
+    async fn handle_message_request_start_tunnel(
+        &mut self,
+        request_id: u32,
+        start_tunnel: StartTunnelRequest,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        info!("Received start tunnel request: {:?}", start_tunnel);
+        match self
+            .handle_start_tunnel_request(request_id, start_tunnel.address, start_tunnel.port)
+            .await
+        {
+            Ok(_) => info!("Start tunnel request handled successfully."),
+            Err(e) => error!("Error handling start tunnel request: {}", e),
+        };
+        Ok(())
+    }
+
+    async fn handle_message_request_status(
+        &mut self,
+        request_id: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let Some(get_status) = self.get_status.as_ref() else {
+            error!("get_battery_percentage is not set");
+            return Err("get_battery_percentage function not set".into());
+        };
+        let status = get_status().await;
+        let data = ResponseData::Status(StatusResponseData {
+            battery_percentage: status.battery_percentage,
+        });
+        let response = MessageResponse {
+            id: request_id,
+            result: MoblinkResult::Ok(Present {}),
+            data,
+        };
+        let text = serde_json::to_string(&MessageToStreamer::Response(response))?;
+        let Some(writer) = self.ws_writer.as_mut() else {
+            return Err("No writer".into());
+        };
+        writer.send(Message::Text(text.into())).await.ok();
+        Ok(())
     }
 
     async fn handle_start_tunnel_request(
