@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::{fs::File, io::AsyncReadExt, process::Command};
 
 use clap::Parser;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use relay::GetStatusClosure;
 
@@ -153,7 +153,6 @@ async fn run_manual(args: Args, relay_id: String, streamer_url: String) {
 async fn run_automatic(args: Args, relay_id: String) {
     let mdns_task = tokio::spawn(async move {
         let mut retries = 0;
-        let relay = relay::Relay::new();
 
         loop {
             let mdns = ServiceDaemon::new().expect("Failed to create mDNS daemon");
@@ -162,6 +161,7 @@ async fn run_automatic(args: Args, relay_id: String) {
                 .expect("Failed to browse services");
 
             info!("Searching for Moblink streamers via mDNS...");
+            let relay = relay::Relay::new();
 
             while let Ok(event) = receiver.recv_async().await {
                 let mut relay = relay.lock().await;
@@ -173,7 +173,6 @@ async fn run_automatic(args: Args, relay_id: String) {
                         }
                         // Handle network interface binding
                         if !args.bind_address.is_empty() {
-                            debug!("Binding to network interface: {}", args.bind_address);
                             relay.set_bind_address(args.bind_address.clone());
                         }
 
@@ -191,7 +190,6 @@ async fn run_automatic(args: Args, relay_id: String) {
                             let streamer_url = format!("ws://{}:{}", ip, port);
                             info!("Discovered Moblink streamer at {}", streamer_url);
 
-                            debug!("Setting up relay...");
                             relay
                                 .setup(
                                     streamer_url,
@@ -206,7 +204,7 @@ async fn run_automatic(args: Args, relay_id: String) {
                                 )
                                 .await;
                         }
-                        debug!("Starting relay...");
+
                         relay.start().await;
                     }
                     ServiceEvent::ServiceRemoved(_, _) => {
