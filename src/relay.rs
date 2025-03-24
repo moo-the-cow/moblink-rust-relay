@@ -68,7 +68,6 @@ impl Relay {
         })
     }
 
-    #[allow(dead_code)]
     pub fn set_bind_address(&mut self, address: String) {
         self.bind_address = address;
     }
@@ -310,13 +309,7 @@ impl Relay {
             name: self.name.clone(),
             authentication,
         };
-        let message = MessageToStreamer::Identify(identify);
-        let text = serde_json::to_string(&message)?;
-        let Some(writer) = self.ws_writer.as_mut() else {
-            return Err("No writer".into());
-        };
-        writer.send(Message::Text(text.into())).await?;
-        Ok(())
+        self.send(MessageToStreamer::Identify(identify)).await
     }
 
     async fn handle_message_identified(
@@ -339,61 +332,19 @@ impl Relay {
         &mut self,
         request: MessageRequest,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        match request.data {
+        match &request.data {
             MessageRequestData::StartTunnel(start_tunnel) => {
-                self.handle_message_request_start_tunnel(request.id, start_tunnel)
+                self.handle_message_request_start_tunnel(&request, start_tunnel)
                     .await
             }
-            MessageRequestData::Status(_) => self.handle_message_request_status(request.id).await,
+            MessageRequestData::Status(_) => self.handle_message_request_status(request).await,
         }
     }
 
     async fn handle_message_request_start_tunnel(
         &mut self,
-        request_id: u32,
-        start_tunnel: StartTunnelRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        info!("Received start tunnel request: {:?}", start_tunnel);
-        match self
-            .handle_start_tunnel_request(request_id, start_tunnel.address, start_tunnel.port)
-            .await
-        {
-            Ok(_) => info!("Start tunnel request handled successfully."),
-            Err(e) => error!("Error handling start tunnel request: {}", e),
-        };
-        Ok(())
-    }
-
-    async fn handle_message_request_status(
-        &mut self,
-        request_id: u32,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let Some(get_status) = self.get_status.as_ref() else {
-            error!("get_battery_percentage is not set");
-            return Err("get_battery_percentage function not set".into());
-        };
-        let status = get_status().await;
-        let data = ResponseData::Status(StatusResponseData {
-            battery_percentage: status.battery_percentage,
-        });
-        let response = MessageResponse {
-            id: request_id,
-            result: MoblinkResult::Ok(Present {}),
-            data,
-        };
-        let text = serde_json::to_string(&MessageToStreamer::Response(response))?;
-        let Some(writer) = self.ws_writer.as_mut() else {
-            return Err("No writer".into());
-        };
-        writer.send(Message::Text(text.into())).await.ok();
-        Ok(())
-    }
-
-    async fn handle_start_tunnel_request(
-        &mut self,
-        request_id: u32,
-        destination_ip: String,
-        destination_port: u16,
+        request: &MessageRequest,
+        start_tunnel: &StartTunnelRequest,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Pick bind addresses from the relay
         let local_bind_addr_for_streamer = parse_socket_addr("0.0.0.0")?;
@@ -414,17 +365,8 @@ impl Relay {
         let data = ResponseData::StartTunnel(StartTunnelResponseData {
             port: streamer_port,
         });
-        let response = MessageResponse {
-            id: request_id,
-            result: MoblinkResult::Ok(Present {}),
-            data,
-        };
-        let text = serde_json::to_string(&MessageToStreamer::Response(response))?;
-        info!("Sending start tunnel response: {}", text);
-        let Some(writer) = self.ws_writer.as_mut() else {
-            return Err("No writer".into());
-        };
-        writer.send(Message::Text(text.into())).await?;
+        let response = request.to_ok_response(data);
+        self.send(MessageToStreamer::Response(response)).await?;
 
         // Create a new UDP socket for communication with the destination.
         // Use dual-stack socket creation.
@@ -437,7 +379,7 @@ impl Relay {
         );
         let destination_socket = Arc::new(destination_socket);
 
-        let normalized_ip = match IpAddr::from_str(&destination_ip)? {
+        let normalized_ip = match IpAddr::from_str(&start_tunnel.address)? {
             IpAddr::V4(v4) => IpAddr::V4(v4),
             IpAddr::V6(v6) => {
                 // If it’s an IPv4-mapped IPv6 like ::ffff:x.x.x.x, convert to real IPv4
@@ -449,7 +391,7 @@ impl Relay {
                 }
             }
         };
-        let destination_addr = SocketAddr::new(normalized_ip, destination_port);
+        let destination_addr = SocketAddr::new(normalized_ip, start_tunnel.port);
         info!("Destination address resolved: {}", destination_addr);
 
         // Use an Arc<Mutex> to share the server_remote_addr between tasks.
@@ -499,6 +441,34 @@ impl Relay {
             }
         });
 
+        Ok(())
+    }
+
+    async fn handle_message_request_status(
+        &mut self,
+        request: MessageRequest,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let Some(get_status) = self.get_status.as_ref() else {
+            error!("get_battery_percentage is not set");
+            return Err("get_battery_percentage function not set".into());
+        };
+        let status = get_status().await;
+        let data = ResponseData::Status(StatusResponseData {
+            battery_percentage: status.battery_percentage,
+        });
+        let response = request.to_ok_response(data);
+        self.send(MessageToStreamer::Response(response)).await
+    }
+
+    async fn send(
+        &mut self,
+        message: MessageToStreamer,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let text = serde_json::to_string(&message)?;
+        let Some(writer) = self.ws_writer.as_mut() else {
+            return Err("No websocket writer".into());
+        };
+        writer.send(Message::Text(text.into())).await?;
         Ok(())
     }
 }
