@@ -112,38 +112,53 @@ fn create_get_status_closure(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-
     setup_logging(Some(args.log_level.clone()));
+    let relay_id = args.id.clone().unwrap_or(uuid::Uuid::new_v4().to_string());
 
-    // Get or generate relay ID
-    let relay_id = args.id.unwrap_or(uuid::Uuid::new_v4().to_string());
-    let relay_id_clone = relay_id.clone();
+    if let Some(streamer_url) = args.streamer_url.clone() {
+        run_manual(args, relay_id, streamer_url).await;
+    } else {
+        run_automatic(args, relay_id).await;
+    }
 
-    // mDNS discovery task
-    let password = args.password.clone();
-    let name = args.name.clone();
+    Ok(())
+}
 
-    let streamer_url_clone = args.streamer_url.clone();
-    let bind_address_clone = args.bind_address.clone();
+async fn run_manual(args: Args, relay_id: String, streamer_url: String) {
+    let relay = relay::Relay::new();
 
-    let status_executable = args.status_executable.clone();
-    let status_file = args.status_file.clone();
+    if !args.bind_address.is_empty() {
+        relay.lock().await.set_bind_address(args.bind_address);
+    }
 
+    relay
+        .lock()
+        .await
+        .setup(
+            streamer_url,
+            args.password,
+            relay_id,
+            args.name,
+            |status| info!("Status: {}", status),
+            create_get_status_closure(&args.status_executable, &args.status_file),
+        )
+        .await;
+    relay.lock().await.start().await;
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    }
+}
+
+async fn run_automatic(args: Args, relay_id: String) {
     let mdns_task = tokio::spawn(async move {
         let mut retries = 0;
-
-        if streamer_url_clone.is_some() {
-            info!("Using provided streamer URL, skipping mDNS discovery");
-            return;
-        }
-
         let relay = relay::Relay::new();
 
         loop {
             let mdns = ServiceDaemon::new().expect("Failed to create mDNS daemon");
-            let service_type = "_moblink._tcp.local.";
             let receiver = mdns
-                .browse(service_type)
+                .browse("_moblink._tcp.local.")
                 .expect("Failed to browse services");
 
             info!("Searching for Moblink streamers via mDNS...");
@@ -157,9 +172,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
                         // Handle network interface binding
-                        if !bind_address_clone.is_empty() {
-                            debug!("Binding to network interface: {}", bind_address_clone);
-                            relay.set_bind_address(bind_address_clone.clone());
+                        if !args.bind_address.is_empty() {
+                            debug!("Binding to network interface: {}", args.bind_address);
+                            relay.set_bind_address(args.bind_address.clone());
                         }
 
                         let port = info.get_port();
@@ -180,11 +195,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             relay
                                 .setup(
                                     streamer_url,
-                                    password.clone(),
-                                    relay_id_clone.clone(),
-                                    name.clone(),
+                                    args.password.clone(),
+                                    relay_id.clone(),
+                                    args.name.clone(),
                                     |status| info!("Status: {}", status),
-                                    create_get_status_closure(&status_executable, &status_file),
+                                    create_get_status_closure(
+                                        &args.status_executable,
+                                        &args.status_file,
+                                    ),
                                 )
                                 .await;
                         }
@@ -209,32 +227,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Err(e) = mdns_task.await {
         warn!("mDNS task failed: {:?}", e);
-    }
-
-    // If URL was provided, use it directly
-    let relay = relay::Relay::new();
-
-    if let Some(streamer_url) = args.streamer_url {
-        let mut relay = relay.lock().await;
-        // Handle network interface binding
-        if !args.bind_address.is_empty() {
-            relay.set_bind_address(args.bind_address);
-        }
-        relay
-            .setup(
-                streamer_url,
-                args.password,
-                relay_id,
-                args.name,
-                |status| info!("Status: {}", status),
-                create_get_status_closure(&args.status_executable, &args.status_file),
-            )
-            .await;
-        relay.start().await;
-    }
-
-    // Keep main alive
-    loop {
-        tokio::time::sleep(Duration::from_secs(3600)).await;
     }
 }
