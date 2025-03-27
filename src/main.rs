@@ -1,7 +1,6 @@
 mod protocol;
 mod relay;
 
-use std::io::Write;
 use std::time::Duration;
 use tokio::{fs::File, io::AsyncReadExt, process::Command};
 
@@ -48,24 +47,12 @@ struct Args {
     status_file: Option<String>,
 }
 
-fn setup_logging(log_level: Option<String>) {
-    let mut log_cfg = env_logger::builder();
-    log_cfg.format(|buf, record| {
-        let ts = buf.timestamp_micros();
-        let style = buf.default_level_style(record.level());
-        writeln!(
-            buf,
-            "[{ts} {:?} {} {style}{}{style:#}] {}",
-            std::thread::current().id(),
-            record.target(),
-            record.level(),
-            record.args()
-        )
-    });
-    if let Some(log_filters) = &log_level {
-        log_cfg.parse_filters(log_filters);
-    }
-    log_cfg.init();
+fn setup_logging(log_level: &str) {
+    env_logger::builder()
+        .default_format()
+        .format_timestamp_millis()
+        .parse_filters(log_level)
+        .init();
 }
 
 fn create_get_status_closure(
@@ -95,9 +82,7 @@ fn create_get_status_closure(
             } else {
                 return Default::default();
             };
-            let Ok(output) = String::from_utf8(output) else {
-                return Default::default();
-            };
+            let output = String::from_utf8(output).unwrap_or_default();
             match serde_json::from_str(&output) {
                 Ok(status) => status,
                 Err(e) => {
@@ -112,7 +97,7 @@ fn create_get_status_closure(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    setup_logging(Some(args.log_level.clone()));
+    setup_logging(&args.log_level);
     let relay_id = args.id.clone().unwrap_or(uuid::Uuid::new_v4().to_string());
 
     if let Some(streamer_url) = args.streamer_url.clone() {
