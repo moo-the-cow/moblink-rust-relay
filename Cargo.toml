@@ -32,13 +32,13 @@ pnet = "0.35.0"
 socket2 = "0.5.8"
 mdns-sd = "0.13.1"
 
-# Disable getrandom entirely (no fallback, no syscalls)
+# Disable getrandom SYSTEM-WIDE
 [dependencies.getrandom]
 version = "0.2"
-features = ["custom"]  # We'll provide a dummy implementation
-optional = true        # Allow crates to ignore it
+default-features = false
+features = []  # EMPTY - no implementations enabled
 
-[dependencies.rand]
-version = "0.8"
-default-features = false  # Disable getrandom dependency
-features = ["std_rng"]    # Only use basic PRNG (no OS randomness)
+# Force all dependencies to use this configuration
+[patch.crates-io]
+getrandom = { version = "0.2", default-features = false, features = [] }
+rand = { version = "0.8", default-features = false }
