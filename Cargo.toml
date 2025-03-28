@@ -32,8 +32,10 @@ pnet = "0.35.0"
 socket2 = "0.5.8"
 mdns-sd = "0.13.1"
 
-# Override all dependencies
-[patch.crates-io]
-libc = { version = "=0.2.169" }
-getrandom = { version = "=0.2.15", features = ["js"] }
-socket2 = { version = "=0.5.8", default-features = false }
+# Force specific working versions
+[dependencies.libc]
+version = "=0.2.169"  # Exact version that works
+
+[dependencies.getrandom]
+version = "=0.2.15"   # Older compatible version
+features = ["js"]      # Fallback implementation
