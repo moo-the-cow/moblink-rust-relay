@@ -28,7 +28,11 @@ log = "0.4"
 env_logger = "0.11"
 anstyle = "1.0.10"
 uuid = { version = "1.11", features = ["v4"] }
-getrandom = { version = "0.2", features = ["js"] }
 pnet = "0.35.0"
 socket2 = "0.5.8"
 mdns-sd = "0.13.1"
+
+[target.mips-unknown-linux-musl]
+pre-build = [
+    "apt-get update && apt-get install -y gcc-mips-linux-gnu",
+]
