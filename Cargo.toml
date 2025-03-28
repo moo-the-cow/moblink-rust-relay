@@ -36,7 +36,7 @@ mdns-sd = "0.13.1"
 #socket2 = { version = "0.5.8", default-features = false }
 
 # Add these exact dependency specifications:
-libc = "=0.2.169"  # Exact version from working build
-getrandom = { version = "=0.2.15", features = ["js"] }  # Pinned version with JS fallback
-rand = "=0.8.5"    # Exact version from working build
-rand_core = "=0.6.4"
+libc = "=0.2.169"
+getrandom = "=0.3.1" 
+#rand = "=0.8.5"
+#rand_core = "=0.6.4"
