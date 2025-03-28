@@ -33,11 +33,10 @@ uuid = { version = "1.11", features = ["v4"] }
 mdns-sd = "0.13.1"
 
 pnet = { version = "0.35.0", default-features = false }
-socket2 = { version = "0.5.8", default-features = false, features = ["all"] }
+socket2 = { version = "0.5.8", default-features = false }
 
-# Force compatible versions globally
-[patch.crates-io]
-libc = "0.2.169"  # Working version
-getrandom = { version = "0.2.15", features = ["js"] }  # Use JS fallback
-rand = { version = "0.8.5", default-features = false }  # Match working build
-rand_core = "0.6.4"  # Exact version from working build
+# Add these exact dependency specifications:
+libc = "=0.2.169"  # Exact version from working build
+getrandom = { version = "=0.2.15", features = ["js"] }  # Pinned version with JS fallback
+rand = "=0.8.5"    # Exact version from working build
+rand_core = "=0.6.4"
