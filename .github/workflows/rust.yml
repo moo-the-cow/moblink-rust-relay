@@ -21,7 +21,7 @@ jobs:
 
     - name: Release-mips
       #run: rustup default nightly && cross build --target mips-unknown-linux-musl --release -Z build-std
-      run: rustup default stable && cross build --target mips-unknown-linux-musl --release -Z build-std
+      run: rustup default stable && cross build --target mips-unknown-linux-musl --release
 
     - name: Move Binary (on success)
       run: |
