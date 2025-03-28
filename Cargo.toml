@@ -28,12 +28,12 @@ log = "0.4"
 env_logger = "0.11"
 anstyle = "1.0.10"
 uuid = { version = "1.11", features = ["v4"] }
-#pnet = "0.35.0"
-#socket2 = "0.5.8"
+pnet = "0.35.0"
+socket2 = "0.5.8"
 mdns-sd = "0.13.1"
 
-pnet = { version = "0.35.0", default-features = false }
-socket2 = { version = "0.5.8", default-features = false }
+#pnet = { version = "0.35.0", default-features = false }
+#socket2 = { version = "0.5.8", default-features = false }
 
 # Add these exact dependency specifications:
 libc = "=0.2.169"  # Exact version from working build
