@@ -31,6 +31,3 @@ uuid = { version = "1.11", features = ["v4"] }
 pnet = "0.35.0"
 socket2 = "0.5.8"
 mdns-sd = "0.13.1"
-
-[target.mips-unknown-linux-musl]
-image = "ghcr.io/cross-rs/mips-unknown-linux-musl:main"
