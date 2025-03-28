@@ -28,20 +28,17 @@ log = "0.4"
 env_logger = "0.11"
 anstyle = "1.0.10"
 uuid = { version = "1.11", features = ["v4"] }
-#pnet = "0.35.0"
+pnet = "0.35.0"
 socket2 = "0.5.8"
 mdns-sd = "0.13.1"
 
-
-pnet = { version = "0.35.0", default-features = false, features = ["datalink"] }
-
-# COMPLETELY disable getrandom (not even dummy fallback)
+# Disable getrandom entirely (no fallback, no syscalls)
 [dependencies.getrandom]
 version = "0.2"
-features = ["custom"]  # Tell it we'll provide our own (empty) impl
-optional = true        # Make it optional (will be ignored if nothing needs it)
+features = ["custom"]  # We'll provide a dummy implementation
+optional = true        # Allow crates to ignore it
 
 [dependencies.rand]
 version = "0.8"
-default-features = false  # Disable getrandom in rand
-features = ["std"]        # Only keep std support
+default-features = false  # Disable getrandom dependency
+features = ["std_rng"]    # Only use basic PRNG (no OS randomness)
