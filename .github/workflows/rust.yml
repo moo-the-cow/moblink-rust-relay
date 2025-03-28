@@ -4,7 +4,7 @@ on:
   release:
     types: [created]
   push:
-    branches: [ "stable" ]
+    branches: [ "main" ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,7 +20,7 @@ jobs:
       run: rustup default stable && cargo build --release
 
     - name: Release-mips
-      run: rustup default nightly && cross build --target mips-unknown-linux-musl --release -Z build-std
+      run: rustup install 1.84.1 && rustup default 1.84.1 && cross build --target mips-unknown-linux-musl --release -Z build-std
 
     - name: Move Binary (on success)
       run: |
