@@ -32,5 +32,5 @@ pnet = "0.35.0"
 socket2 = "0.5.8"
 mdns-sd = "0.13.1"
 #[target.mips-unknown-linux-musl]
-libc = "0.2.171"
+#libc = "0.2.171"
 #libc = { version = "0.2.150", features = ["extra_traits"] }
