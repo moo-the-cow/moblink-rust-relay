@@ -17,10 +17,10 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Release
-      run: rustup default stable && cargo update && cargo build --release
+      run: rustup default stable && cargo build --release
 
     - name: Release-mips
-      run: rustup default nightly && cross update && cross build --target mips-unknown-linux-musl --release -Z build-std
+      run: rustup default nightly && cross build --target mips-unknown-linux-musl --release -Z build-std
 
     - name: Move Binary (on success)
       run: |
