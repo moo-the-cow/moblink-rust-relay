@@ -32,10 +32,12 @@ pnet = "0.35.0"
 socket2 = "0.5.8"
 mdns-sd = "0.13.1"
 
-# Force specific working versions
-[dependencies.libc]
-version = "=0.2.169"  # Exact version that works
+pnet = { version = "0.35.0", default-features = false }
+socket2 = { version = "0.5.8", default-features = false, features = ["all"] }
 
-[dependencies.getrandom]
-version = "=0.2.15"   # Older compatible version
-features = ["js"]      # Fallback implementation
+# Force compatible versions globally
+[patch.crates-io]
+libc = "0.2.169"  # Working version
+getrandom = { version = "0.2.15", features = ["js"] }  # Use JS fallback
+rand = { version = "0.8.5", default-features = false }  # Match working build
+rand_core = "0.6.4"  # Exact version from working build
