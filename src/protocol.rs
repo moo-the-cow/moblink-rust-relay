@@ -48,6 +48,16 @@ pub struct MessageRequest {
     pub data: MessageRequestData,
 }
 
+impl MessageRequest {
+    pub fn to_ok_response(&self, data: ResponseData) -> MessageResponse {
+        MessageResponse {
+            id: self.id,
+            result: MoblinkResult::Ok(Present {}),
+            data,
+        }
+    }
+}
+
 #[derive(Serialize, Debug)]
 pub struct StartTunnelResponseData {
     pub port: u16,

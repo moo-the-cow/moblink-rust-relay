@@ -3,18 +3,17 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use futures_util::stream::SplitSink;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info};
 use sha2::{Digest, Sha256};
-use tokio::net::TcpStream;
-use tokio::sync::mpsc::{self};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
@@ -30,6 +29,7 @@ pub type GetStatusClosure =
     Box<dyn Fn() -> Pin<Box<dyn Future<Output = Status> + Send + Sync>> + Send + Sync>;
 
 pub struct Relay {
+    me: Weak<Mutex<Self>>,
     /// Store a local IP address  for binding UDP sockets
     bind_address: String,
     relay_id: String,
@@ -37,63 +37,37 @@ pub struct Relay {
     password: String,
     name: String,
     on_status_updated: Option<Box<dyn Fn(String) + Send + Sync>>,
-    #[allow(clippy::type_complexity)]
     get_status: Option<Arc<GetStatusClosure>>,
-    ws_in: Option<Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>>,
+    ws_writer: Option<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>,
     started: bool,
     connected: bool,
     wrong_password: bool,
+    reconnect_on_tunnel_error: Arc<Mutex<bool>>,
+    start_on_reconnect_soon: Arc<Mutex<bool>>,
 }
 
 impl Relay {
-    pub fn new() -> Self {
-        Self {
-            bind_address: Self::get_default_bind_address(),
-            relay_id: "".to_string(),
-            streamer_url: "".to_string(),
-            password: "".to_string(),
-            name: "".to_string(),
-            on_status_updated: None,
-            get_status: None,
-            ws_in: None,
-            started: false,
-            connected: false,
-            wrong_password: false,
-        }
-    }
-
-    fn get_default_bind_address() -> String {
-        // Get main network interface
-        let interfaces = pnet::datalink::interfaces();
-        let interface = interfaces.iter().find(|interface| {
-            interface.is_up() && !interface.is_loopback() && !interface.ips.is_empty()
-        });
-
-        let interface = match interface {
-            Some(interface) => interface,
-            None => {
-                panic!("No available network interfaces found");
-            }
-        };
-
-        // Only ipv4 addresses are supported
-        let ipv4_addresses: Vec<String> = interface
-            .ips
-            .iter()
-            .filter_map(|ip| {
-                let ip = ip.ip();
-                ip.is_ipv4().then(|| ip.to_string())
+    pub fn new() -> Arc<Mutex<Self>> {
+        Arc::new_cyclic(|me| {
+            Mutex::new(Self {
+                me: me.clone(),
+                bind_address: Self::get_default_bind_address(),
+                relay_id: "".to_string(),
+                streamer_url: "".to_string(),
+                password: "".to_string(),
+                name: "".to_string(),
+                on_status_updated: None,
+                get_status: None,
+                ws_writer: None,
+                started: false,
+                connected: false,
+                wrong_password: false,
+                reconnect_on_tunnel_error: Arc::new(Mutex::new(false)),
+                start_on_reconnect_soon: Arc::new(Mutex::new(false)),
             })
-            .collect();
-
-        // Return the first address
-        ipv4_addresses
-            .get(0)
-            .cloned()
-            .unwrap_or_else(|| "0.0.0.0:0".to_string())
+        })
     }
 
-    #[allow(dead_code)]
     pub fn set_bind_address(&mut self, address: String) {
         self.bind_address = address;
     }
@@ -122,63 +96,53 @@ impl Relay {
         self.started
     }
 
-    pub async fn start(relay_arc: Arc<Mutex<Self>>) {
-        let mut relay = relay_arc.lock().await;
-        if !relay.started {
-            relay.started = true;
-            drop(relay);
-            Self::start_internal(relay_arc.clone()).await;
+    pub async fn start(&mut self) {
+        if !self.started {
+            self.started = true;
+            self.start_internal().await;
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn stop(relay_arc: Arc<Mutex<Self>>) {
-        let mut relay = relay_arc.lock().await;
-        if relay.started {
-            relay.started = false;
-            relay.stop_internal().await;
+    pub async fn stop(&mut self) {
+        if self.started {
+            self.started = false;
+            self.stop_internal().await;
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn update_settings(
-        &mut self,
-        relay_id: String,
-        streamer_url: String,
-        password: String,
-        name: String,
-    ) {
-        self.relay_id = relay_id;
-        self.streamer_url = streamer_url;
-        self.password = password;
-        self.name = name;
+    fn get_default_bind_address() -> String {
+        // Get main network interface
+        let interfaces = pnet::datalink::interfaces();
+        let interface = interfaces.iter().find(|interface| {
+            interface.is_up() && !interface.is_loopback() && !interface.ips.is_empty()
+        });
+
+        // Only ipv4 addresses are supported
+        let ipv4_addresses: Vec<String> = interface
+            .expect("No available network interfaces found")
+            .ips
+            .iter()
+            .filter_map(|ip| {
+                let ip = ip.ip();
+                ip.is_ipv4().then(|| ip.to_string())
+            })
+            .collect();
+
+        // Return the first address
+        ipv4_addresses
+            .first()
+            .cloned()
+            .unwrap_or("0.0.0.0:0".to_string())
     }
 
-    async fn start_internal(relay_arc: Arc<Mutex<Self>>) {
-        let relay_id: String;
-        let streamer_url: String;
-        let password: String;
-        let name: String;
-        let get_status: Option<Arc<GetStatusClosure>>;
-        {
-            let mut relay = relay_arc.lock().await;
-            if !relay.started {
-                relay.stop_internal().await;
-                return;
-            }
-
-            relay_id = relay.relay_id.clone();
-            streamer_url = relay.streamer_url.clone();
-            password = relay.password.clone();
-            name = relay.name.clone();
-            get_status = relay.get_status.clone();
-
-            if !relay.started {
-                return;
-            }
+    async fn start_internal(&mut self) {
+        info!("Start internal");
+        if !self.started {
+            self.stop_internal().await;
+            return;
         }
 
-        let request = match url::Url::parse(&streamer_url) {
+        let request = match url::Url::parse(&self.streamer_url) {
             Ok(url) => url,
             Err(e) => {
                 error!("Failed to parse URL: {}", e);
@@ -186,271 +150,455 @@ impl Relay {
             }
         };
 
-        let (tx, mut rx) =
-            mpsc::channel::<Result<Message, tokio_tungstenite::tungstenite::Error>>(32);
-        match tokio::time::timeout(Duration::from_secs(10), connect_async(request.to_string()))
-            .await
-        {
+        match timeout(Duration::from_secs(10), connect_async(request.to_string())).await {
             Ok(Ok((ws_stream, _))) => {
                 info!("WebSocket connected");
-                let (write, mut read) = ws_stream.split();
-                {
-                    let mut relay = relay_arc.lock().await;
-                    relay.ws_in = Some(Arc::new(Mutex::new(write)));
-                }
-                // Task to handle incoming messages
-                tokio::spawn(async move {
-                    while let Some(message) = read.next().await {
-                        if let Err(e) = tx.send(message).await {
-                            error!("Failed to send message over channel: {}", e);
-                            break;
-                        }
-                    }
-                });
+                let (writer, reader) = ws_stream.split();
+                self.ws_writer = Some(writer);
+                self.start_websocket_receiver(reader);
             }
-
-            Ok(Err(e)) => {
+            Ok(Err(error)) => {
                 // This means the future completed but the connection failed
-                error!("WebSocket connection failed immediately: {}", e);
-                let relay_arc_clone = relay_arc.clone();
-                Self::reconnect_soon(relay_arc_clone).await;
-                return;
+                error!("WebSocket connection failed immediately: {}", error);
+                self.reconnect_soon().await;
             }
             Err(_elapsed) => {
                 // This means the future did NOT complete within 10 seconds
                 error!("WebSocket connection attempt timed out after 10 seconds");
-                let relay_arc_clone = relay_arc.clone();
-                Self::reconnect_soon(relay_arc_clone).await;
+                self.reconnect_soon().await;
+            }
+        }
+    }
+
+    fn start_websocket_receiver(
+        &mut self,
+        mut reader: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+    ) {
+        // Task to process messages received from the channel.
+        let relay = self.me.clone();
+
+        tokio::spawn(async move {
+            let Some(relay_arc) = relay.upgrade() else {
                 return;
+            };
+
+            while let Some(result) = reader.next().await {
+                let mut relay = relay_arc.lock().await;
+                match result {
+                    Ok(message) => match message {
+                        Message::Text(text) => {
+                            if let Ok(message) = serde_json::from_str::<MessageToRelay>(&text) {
+                                relay.handle_message(message).await.ok();
+                            } else {
+                                error!("Failed to deserialize message: {}", text);
+                            }
+                        }
+                        Message::Binary(data) => {
+                            debug!("Received binary message of length: {}", data.len());
+                        }
+                        Message::Ping(_) => {
+                            debug!("Received ping message");
+                        }
+                        Message::Pong(_) => {
+                            debug!("Received pong message");
+                        }
+                        Message::Close(frame) => {
+                            info!("Received close message: {:?}", frame);
+                            relay.reconnect_soon().await;
+                            break;
+                        }
+                        Message::Frame(_) => {
+                            unreachable!("This is never used")
+                        }
+                    },
+                    Err(e) => {
+                        error!("Error processing message: {}", e);
+                        // TODO: There has to be a better way to handle this
+                        if e.to_string()
+                            .contains("Connection reset without closing handshake")
+                        {
+                            relay.reconnect_soon().await;
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    async fn stop_internal(&mut self) {
+        info!("Stop internal");
+        if let Some(mut ws_writer) = self.ws_writer.take() {
+            if let Err(e) = ws_writer.close().await {
+                error!("Error closing WebSocket: {}", e);
+            } else {
+                info!("WebSocket closed successfully");
+            }
+        }
+        self.connected = false;
+        self.wrong_password = false;
+        *self.reconnect_on_tunnel_error.lock().await = false;
+        *self.start_on_reconnect_soon.lock().await = false;
+        self.update_status();
+    }
+
+    fn update_status(&self) {
+        let Some(on_status_updated) = &self.on_status_updated else {
+            return;
+        };
+        let status = if self.connected {
+            "Connected to streamer"
+        } else if self.wrong_password {
+            "Wrong password"
+        } else if self.started {
+            "Connecting to streamer"
+        } else {
+            "Disconnected from streamer"
+        };
+        on_status_updated(status.to_string());
+    }
+
+    async fn reconnect_soon(&mut self) {
+        self.stop_internal().await;
+        *self.start_on_reconnect_soon.lock().await = false;
+        let start_on_reconnect_soon = Arc::new(Mutex::new(true));
+        self.start_on_reconnect_soon = start_on_reconnect_soon.clone();
+        self.start_soon(start_on_reconnect_soon);
+    }
+
+    fn start_soon(&mut self, start_on_reconnect_soon: Arc<Mutex<bool>>) {
+        let relay = self.me.clone();
+
+        tokio::spawn(async move {
+            info!("Reconnecting in 5 seconds...");
+            sleep(Duration::from_secs(5)).await;
+
+            if *start_on_reconnect_soon.lock().await {
+                info!("Reconnecting...");
+                if let Some(relay) = relay.upgrade() {
+                    relay.lock().await.start_internal().await;
+                }
+            }
+        });
+    }
+
+    async fn handle_message(
+        &mut self,
+        message: MessageToRelay,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match message {
+            MessageToRelay::Hello(hello) => self.handle_message_hello(hello).await,
+            MessageToRelay::Identified(identified) => {
+                self.handle_message_identified(identified).await
+            }
+            MessageToRelay::Request(request) => self.handle_message_request(request).await,
+        }
+    }
+
+    async fn handle_message_hello(
+        &mut self,
+        hello: Hello,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let authentication = calculate_authentication(
+            &self.password,
+            &hello.authentication.salt,
+            &hello.authentication.challenge,
+        );
+        let identify = Identify {
+            id: self.relay_id.clone(),
+            name: self.name.clone(),
+            authentication,
+        };
+        self.send(MessageToStreamer::Identify(identify)).await
+    }
+
+    async fn handle_message_identified(
+        &mut self,
+        identified: Identified,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match identified.result {
+            MoblinkResult::Ok(_) => {
+                self.connected = true;
+            }
+            MoblinkResult::WrongPassword(_) => {
+                self.wrong_password = true;
+            }
+        }
+        self.update_status();
+        Ok(())
+    }
+
+    async fn handle_message_request(
+        &mut self,
+        request: MessageRequest,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match &request.data {
+            MessageRequestData::StartTunnel(start_tunnel) => {
+                self.handle_message_request_start_tunnel(&request, start_tunnel)
+                    .await
+            }
+            MessageRequestData::Status(_) => self.handle_message_request_status(request).await,
+        }
+    }
+
+    async fn handle_message_request_start_tunnel(
+        &mut self,
+        request: &MessageRequest,
+        start_tunnel: &StartTunnelRequest,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Pick bind addresses from the relay
+        let local_bind_addr_for_streamer = parse_socket_addr("0.0.0.0")?;
+        let local_bind_addr_for_destination = parse_socket_addr(&self.bind_address)?;
+
+        info!(
+            "Binding streamer socket on: {}, destination socket on: {}",
+            local_bind_addr_for_streamer, local_bind_addr_for_destination
+        );
+        // Create a UDP socket bound for receiving packets from the server.
+        // Use dual-stack socket creation.
+        let streamer_socket = create_dual_stack_udp_socket(local_bind_addr_for_streamer).await?;
+        let streamer_port = streamer_socket.local_addr()?.port();
+        info!("Listening on UDP port: {}", streamer_port);
+        let streamer_socket = Arc::new(streamer_socket);
+
+        // Inform the server about the chosen port.
+        let data = ResponseData::StartTunnel(StartTunnelResponseData {
+            port: streamer_port,
+        });
+        let response = request.to_ok_response(data);
+        self.send(MessageToStreamer::Response(response)).await?;
+
+        // Create a new UDP socket for communication with the destination.
+        // Use dual-stack socket creation.
+        let destination_socket =
+            create_dual_stack_udp_socket(local_bind_addr_for_destination).await?;
+
+        info!(
+            "Bound destination socket to: {:?}",
+            destination_socket.local_addr()?
+        );
+        let destination_socket = Arc::new(destination_socket);
+
+        let normalized_ip = match IpAddr::from_str(&start_tunnel.address)? {
+            IpAddr::V4(v4) => IpAddr::V4(v4),
+            IpAddr::V6(v6) => {
+                // If it’s an IPv4-mapped IPv6 like ::ffff:x.x.x.x, convert to real IPv4
+                if let Some(mapped_v4) = v6.to_ipv4() {
+                    IpAddr::V4(mapped_v4)
+                } else {
+                    // Otherwise, keep it as IPv6
+                    IpAddr::V6(v6)
+                }
             }
         };
+        let destination_addr = SocketAddr::new(normalized_ip, start_tunnel.port);
+        info!("Destination address resolved: {}", destination_addr);
 
-        let ws_in_clone = relay_arc.lock().await.ws_in.clone();
+        // Use an Arc<Mutex> to share the server_remote_addr between tasks.
+        let streamer_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
-        if ws_in_clone.is_none() {
-            error!("Failed to acquire lock to clone WebSocket");
-            return;
-        }
+        let relay_to_destination = start_relay_from_streamer_to_destination(
+            streamer_socket.clone(),
+            destination_socket.clone(),
+            streamer_addr.clone(),
+            destination_addr,
+        );
+        let relay_to_streamer = start_relay_from_destination_to_streamer(
+            streamer_socket,
+            destination_socket,
+            streamer_addr,
+        );
 
-        if let Some(ws_in_clone) = ws_in_clone {
-            // Task to process messages received from the channel.
-            tokio::spawn(async move {
-                while let Some(result) = rx.recv().await {
-                    match result {
-                        Ok(msg) => match msg {
-                            Message::Text(text) => {
-                                info!("Received text message: {}", text);
-                                if let Ok(deserialized) =
-                                    serde_json::from_str::<MessageToRelay>(&text)
-                                {
-                                    match Self::handle_message(
-                                        relay_arc.clone(),
-                                        ws_in_clone.clone(),
-                                        deserialized,
-                                        password.clone(),
-                                        name.clone(),
-                                        relay_id.clone(),
-                                        get_status.clone(),
-                                    )
-                                    .await
-                                    {
-                                        Ok(_) => info!("Message handled successfully"),
-                                        Err(e) => error!("Error handling message: {}", e),
-                                    };
-                                } else {
-                                    error!("Failed to deserialize message: {}", text);
-                                }
-                            }
-                            Message::Binary(data) => {
-                                debug!("Received binary message of length: {}", data.len());
-                            }
-                            Message::Ping(_) => {
-                                debug!("Received ping message");
-                            }
-                            Message::Pong(_) => {
-                                debug!("Received pong message");
-                            }
-                            Message::Close(frame) => {
-                                info!("Received close message: {:?}", frame);
-                                break;
-                            }
-                            Message::Frame(_) => {
-                                unreachable!("This is never used")
-                            }
-                        },
+        *self.reconnect_on_tunnel_error.lock().await = false;
+        let reconnect_on_tunnel_error = Arc::new(Mutex::new(true));
+        self.reconnect_on_tunnel_error = reconnect_on_tunnel_error.clone();
+        let relay = self.me.clone();
+
+        tokio::spawn(async move {
+            let Some(relay) = relay.upgrade() else {
+                return;
+            };
+
+            // Wait for relay tasks to complete (they won't unless an error occurs or the
+            // socket is closed).
+            tokio::select! {
+                res = relay_to_destination => {
+                    if let Err(e) = res {
+                        error!("relay_to_destination task failed: {}", e);
+                    }
+                }
+                res = relay_to_streamer => {
+                    if let Err(e) = res {
+                        error!("relay_to_streamer task failed: {}", e);
+                    }
+                }
+            }
+
+            if *reconnect_on_tunnel_error.lock().await {
+                relay.lock().await.reconnect_soon().await;
+            } else {
+                info!("Not reconnecting after tunnel error");
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn handle_message_request_status(
+        &mut self,
+        request: MessageRequest,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let Some(get_status) = self.get_status.as_ref() else {
+            error!("get_battery_percentage is not set");
+            return Err("get_battery_percentage function not set".into());
+        };
+        let status = get_status().await;
+        let data = ResponseData::Status(StatusResponseData {
+            battery_percentage: status.battery_percentage,
+        });
+        let response = request.to_ok_response(data);
+        self.send(MessageToStreamer::Response(response)).await
+    }
+
+    async fn send(
+        &mut self,
+        message: MessageToStreamer,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let text = serde_json::to_string(&message)?;
+        let Some(writer) = self.ws_writer.as_mut() else {
+            return Err("No websocket writer".into());
+        };
+        writer.send(Message::Text(text.into())).await?;
+        Ok(())
+    }
+}
+
+fn start_relay_from_streamer_to_destination(
+    streamer_socket: Arc<UdpSocket>,
+    destination_socket: Arc<UdpSocket>,
+    streamer_addr: Arc<Mutex<Option<SocketAddr>>>,
+    destination_addr: SocketAddr,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        debug!("(relay_to_destination) Task started");
+        loop {
+            let mut buf = [0; 2048];
+            let (size, remote_addr) =
+                match timeout(Duration::from_secs(30), streamer_socket.recv_from(&mut buf)).await {
+                    Ok(result) => match result {
+                        Ok((size, addr)) => (size, addr),
                         Err(e) => {
-                            error!("Error processing message: {}", e);
-                            // TODO: There has to be a better way to handle this
-                            if e.to_string()
-                                .contains("Connection reset without closing handshake")
-                            {
-                                let relay_arc_clone = relay_arc.clone();
-                                Self::reconnect_soon(relay_arc_clone).await;
-                            }
+                            error!("(relay_to_destination) Error receiving from server: {}", e);
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        error!(
+                            "(relay_to_destination) Timeout receiving from server: {}",
+                            e
+                        );
+                        break;
+                    }
+                };
+
+            debug!(
+                "(relay_to_destination) Received {} bytes from server: {}",
+                size, remote_addr
+            );
+
+            // Forward to destination.
+            match destination_socket
+                .send_to(&buf[..size], &destination_addr)
+                .await
+            {
+                Ok(bytes_sent) => {
+                    debug!(
+                        "(relay_to_destination) Sent {} bytes to destination",
+                        bytes_sent
+                    )
+                }
+                Err(e) => {
+                    error!(
+                        "(relay_to_destination) Failed to send to destination: {}",
+                        e
+                    );
+                    break;
+                }
+            }
+
+            // Set the remote address if it hasn't been set yet.
+            let mut streamer_addr_lock = streamer_addr.lock().await;
+            if streamer_addr_lock.is_none() {
+                *streamer_addr_lock = Some(remote_addr);
+                debug!(
+                    "(relay_to_destination) Server remote address set to: {}",
+                    remote_addr
+                );
+            }
+        }
+        info!("(relay_to_destination) Task exiting");
+    })
+}
+
+fn start_relay_from_destination_to_streamer(
+    streamer_socket: Arc<UdpSocket>,
+    destination_socket: Arc<UdpSocket>,
+    streamer_addr: Arc<Mutex<Option<SocketAddr>>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        debug!("(relay_to_streamer) Task started");
+        loop {
+            let mut buf = [0; 2048];
+            let (size, remote_addr) = match timeout(
+                Duration::from_secs(30),
+                destination_socket.recv_from(&mut buf),
+            )
+            .await
+            {
+                Ok(result) => match result {
+                    Ok((size, addr)) => (size, addr),
+                    Err(e) => {
+                        error!(
+                            "(relay_to_streamer) Error receiving from destination: {}",
+                            e
+                        );
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    error!(
+                        "(relay_to_streamer) Timeout receiving from destination: {}",
+                        e
+                    );
+                    break;
+                }
+            };
+
+            debug!(
+                "(relay_to_streamer) Received {} bytes from destination: {}",
+                size, remote_addr
+            );
+            // Forward to server.
+            let streamer_addr_lock = streamer_addr.lock().await;
+            match *streamer_addr_lock {
+                Some(streamer_addr) => {
+                    match streamer_socket.send_to(&buf[..size], &streamer_addr).await {
+                        Ok(bytes_sent) => {
+                            debug!("(relay_to_streamer) Sent {} bytes to server", bytes_sent)
+                        }
+                        Err(e) => {
+                            error!("(relay_to_streamer) Failed to send to server: {}", e);
                             break;
                         }
                     }
                 }
-            });
-        }
-    }
-
-    async fn stop_internal(&mut self) {
-        info!("Stopping internal processes");
-        if let Some(ws_in) = &self.ws_in {
-            if let Ok(mut locked_ws) = ws_in.try_lock() {
-                if let Err(e) = locked_ws.close().await {
-                    error!("Error closing WebSocket: {}", e);
-                } else {
-                    info!("WebSocket closed successfully");
+                None => {
+                    error!("(relay_to_streamer) Server address not set, cannot forward packet");
                 }
-            } else {
-                error!("Failed to acquire lock to close WebSocket");
             }
-            self.ws_in = None;
         }
-        self.connected = false;
-        self.wrong_password = false;
-        self.update_status_internal().await;
-    }
-
-    async fn update_status_internal(&self) {
-        let status = if self.connected {
-            "Connected to streamer".to_string()
-        } else if self.wrong_password {
-            "Wrong password".to_string()
-        } else if self.started {
-            "Connecting to streamer".to_string()
-        } else {
-            "Disconnected from streamer".to_string()
-        };
-        if let Some(on_status_updated) = &self.on_status_updated {
-            on_status_updated(status);
-        }
-    }
-
-    fn reconnect_soon(relay_arc: Arc<Mutex<Self>>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async move {
-            {
-                let mut relay = relay_arc.lock().await;
-                relay.stop_internal().await;
-            }
-
-            info!("Reconnecting in 5 seconds...");
-            sleep(Duration::from_secs(5)).await;
-
-            Self::start_internal(relay_arc.clone()).await;
-        })
-    }
-
-    async fn handle_message(
-        relay_arc: Arc<Mutex<Self>>,
-        ws_in: Arc<
-            Mutex<
-                futures_util::stream::SplitSink<
-                    WebSocketStream<MaybeTlsStream<TcpStream>>,
-                    Message,
-                >,
-            >,
-        >,
-        message: MessageToRelay,
-        password: String,
-        name: String,
-        relay_id: String,
-        get_status: Option<Arc<GetStatusClosure>>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        match message {
-            MessageToRelay::Hello(hello) => {
-                let authentication = calculate_authentication(
-                    &password,
-                    &hello.authentication.salt,
-                    &hello.authentication.challenge,
-                );
-                let identify = Identify {
-                    id: relay_id,
-                    name,
-                    authentication,
-                };
-                let message = MessageToStreamer::Identify(identify);
-                let text = serde_json::to_string(&message)?;
-                let mut locked_ws_in = ws_in.lock().await;
-                info!("Sending identify message: {}", text);
-                locked_ws_in.send(Message::Text(text.into())).await?;
-                Ok(())
-            }
-            MessageToRelay::Identified(identified) => {
-                info!("Received identified message: {:?}", identified);
-                let mut relay = relay_arc.lock().await;
-                match identified.result {
-                    MoblinkResult::Ok(_) => {
-                        relay.connected = true;
-                    }
-                    MoblinkResult::WrongPassword(_) => {
-                        relay.wrong_password = true;
-                    }
-                }
-                relay.update_status_internal().await;
-                Ok(())
-            }
-            MessageToRelay::Request(request) => match request.data {
-                MessageRequestData::StartTunnel(start_tunnel) => {
-                    info!("Received start tunnel request: {:?}", start_tunnel);
-                    let request_id = request.id;
-                    let cloned_ws_in = ws_in.clone();
-                    tokio::spawn(async move {
-                        match handle_start_tunnel_request(
-                            relay_arc,
-                            cloned_ws_in,
-                            request_id,
-                            start_tunnel.address,
-                            start_tunnel.port,
-                        )
-                        .await
-                        {
-                            Ok(_) => info!("Start tunnel request handled successfully."),
-                            Err(e) => error!("Error handling start tunnel request: {}", e),
-                        };
-                    });
-                    Ok(())
-                }
-                MessageRequestData::Status(_) => {
-                    let Some(get_status) = get_status else {
-                        error!("get_battery_percentage is not set");
-                        return Err("get_battery_percentage function not set".into());
-                    };
-                    info!("Handling status request");
-                    let status = get_status().await;
-                    let data = ResponseData::Status(StatusResponseData {
-                        battery_percentage: status.battery_percentage,
-                    });
-                    let response = MessageResponse {
-                        id: request.id,
-                        result: MoblinkResult::Ok(Present {}),
-                        data,
-                    };
-                    let message = MessageToStreamer::Response(response);
-                    let text = serde_json::to_string(&message);
-
-                    if let Err(e) = text {
-                        error!("Failed to serialize status response: {e}");
-                        return Err(format!("Failed to serialize status response: {e}").into());
-                    }
-                    if let Ok(text) = text {
-                        log::info!("Sending status response: {}", text);
-                        let cloned_ws_in = ws_in.clone();
-                        tokio::spawn(async move {
-                            let mut locked_ws_in = cloned_ws_in.lock().await;
-                            match locked_ws_in.send(Message::Text(text.into())).await {
-                                Ok(_) => info!("Status response sent successfully."),
-                                Err(e) => error!("Failed to send status response: {}", e),
-                            }
-                        });
-                    }
-                    Ok(())
-                }
-            },
-        }
-    }
+        info!("(relay_to_streamer) Task exiting");
+    })
 }
 
 fn calculate_authentication(password: &str, salt: &str, challenge: &str) -> String {
@@ -512,221 +660,4 @@ fn parse_socket_addr(addr_str: &str) -> Result<SocketAddr, std::io::Error> {
         std::io::ErrorKind::InvalidInput,
         "Invalid socket address syntax. Expected 'IP:port' or 'IP'.",
     ))
-}
-
-async fn handle_start_tunnel_request(
-    relay_arc: Arc<Mutex<Relay>>,
-    ws_in: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
-    request_id: u32,
-    destination_ip: String,
-    destination_port: u16,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Pick bind addresses from the relay
-    let (local_bind_addr_for_streamer, local_bind_addr_for_destination) = {
-        let relay = relay_arc.lock().await;
-        let addr = relay.bind_address.clone();
-        (parse_socket_addr("0.0.0.0")?, parse_socket_addr(&addr)?)
-    };
-
-    info!(
-        "Binding streamer socket on: {}, destination socket on: {}",
-        local_bind_addr_for_streamer, local_bind_addr_for_destination
-    );
-    // Create a UDP socket bound for receiving packets from the server.
-    // Use dual-stack socket creation.
-    let streamer_socket = create_dual_stack_udp_socket(local_bind_addr_for_streamer).await?;
-    let streamer_port = streamer_socket.local_addr()?.port();
-    info!("Listening on UDP port: {}", streamer_port);
-    let streamer_socket = Arc::new(streamer_socket);
-
-    // Inform the server about the chosen port.
-    let data = ResponseData::StartTunnel(StartTunnelResponseData {
-        port: streamer_port,
-    });
-    let response = MessageResponse {
-        id: request_id,
-        result: MoblinkResult::Ok(Present {}),
-        data,
-    };
-    let message = MessageToStreamer::Response(response);
-    let text = serde_json::to_string(&message)?;
-    {
-        let mut locked_ws_in = ws_in.lock().await;
-        info!("Sending start tunnel response: {}", text);
-        locked_ws_in.send(Message::Text(text.into())).await?;
-    }
-
-    // Create a new UDP socket for communication with the destination.
-    // Use dual-stack socket creation.
-    let destination_socket = create_dual_stack_udp_socket(local_bind_addr_for_destination).await?;
-
-    info!(
-        "Bound destination socket to: {:?}",
-        destination_socket.local_addr()?
-    );
-    let destination_socket = Arc::new(destination_socket);
-
-    let destination_socket_clone = destination_socket.clone();
-    let streamer_socket_clone = streamer_socket.clone();
-
-    let parsed_ip = IpAddr::from_str(&destination_ip)?;
-    let normalized_ip = match parsed_ip {
-        IpAddr::V4(v4) => IpAddr::V4(v4),
-        IpAddr::V6(v6) => {
-            // If it’s an IPv4-mapped IPv6 like ::ffff:x.x.x.x, convert to real IPv4
-            if let Some(mapped_v4) = v6.to_ipv4() {
-                IpAddr::V4(mapped_v4)
-            } else {
-                // Otherwise, keep it as IPv6
-                IpAddr::V6(v6)
-            }
-        }
-    };
-    let destination_addr = SocketAddr::new(normalized_ip, destination_port);
-    info!("Destination address resolved: {}", destination_addr);
-
-    // Use an Arc<Mutex> to share the server_remote_addr between tasks.
-    let server_remote_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
-
-    // Relay packets from streamer to destination.
-    let relay_to_destination: tokio::task::JoinHandle<()> = {
-        let server_remote_addr_clone = server_remote_addr.clone();
-        tokio::spawn(async move {
-            debug!("(relay_to_destination) Task started");
-            loop {
-                let mut buf = [0; 2048];
-                let (size, remote_addr) = match tokio::time::timeout(
-                    Duration::from_secs(30),
-                    streamer_socket_clone.recv_from(&mut buf),
-                )
-                .await
-                {
-                    Ok(result) => match result {
-                        Ok((size, addr)) => (size, addr),
-                        Err(e) => {
-                            error!("(relay_to_destination) Error receiving from server: {}", e);
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        error!(
-                            "(relay_to_destination) Timeout receiving from server: {}",
-                            e
-                        );
-                        continue;
-                    }
-                };
-
-                debug!(
-                    "(relay_to_destination) Received {} bytes from server: {}",
-                    size, remote_addr
-                );
-                // Forward to destination.
-                match destination_socket_clone
-                    .send_to(&buf[..size], &destination_addr)
-                    .await
-                {
-                    Ok(bytes_sent) => {
-                        debug!(
-                            "(relay_to_destination) Sent {} bytes to destination",
-                            bytes_sent
-                        )
-                    }
-                    Err(e) => {
-                        error!(
-                            "(relay_to_destination) Failed to send to destination: {}",
-                            e
-                        );
-                        break;
-                    }
-                }
-
-                // Set the remote address if it hasn't been set yet.
-                let mut server_remote_addr_lock = server_remote_addr_clone.lock().await;
-                if server_remote_addr_lock.is_none() {
-                    *server_remote_addr_lock = Some(remote_addr);
-                    debug!(
-                        "(relay_to_destination) Server remote address set to: {}",
-                        remote_addr
-                    );
-                }
-            }
-            info!("(relay_to_destination) Task exiting");
-        })
-    };
-    // Relay packets from destination to streamer.
-    let relay_to_streamer = {
-        let server_remote_addr_clone = server_remote_addr.clone();
-        tokio::spawn(async move {
-            debug!("(relay_to_streamer) Task started");
-            loop {
-                let mut buf = [0; 2048];
-                let (size, remote_addr) = match tokio::time::timeout(
-                    Duration::from_secs(30),
-                    destination_socket.recv_from(&mut buf),
-                )
-                .await
-                {
-                    Ok(result) => match result {
-                        Ok((size, addr)) => (size, addr),
-                        Err(e) => {
-                            error!(
-                                "(relay_to_streamer) Error receiving from destination: {}",
-                                e
-                            );
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        error!(
-                            "(relay_to_streamer) Timeout receiving from destination: {}",
-                            e
-                        );
-                        continue;
-                    }
-                };
-
-                debug!(
-                    "(relay_to_streamer) Received {} bytes from destination: {}",
-                    size, remote_addr
-                );
-                // Forward to server.
-                let server_remote_addr_lock = server_remote_addr_clone.lock().await;
-                match *server_remote_addr_lock {
-                    Some(server_addr) => {
-                        match streamer_socket.send_to(&buf[..size], &server_addr).await {
-                            Ok(bytes_sent) => {
-                                debug!("(relay_to_streamer) Sent {} bytes to server", bytes_sent)
-                            }
-                            Err(e) => {
-                                error!("(relay_to_streamer) Failed to send to server: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    None => {
-                        error!("(relay_to_streamer) Server address not set, cannot forward packet");
-                    }
-                }
-            }
-            info!("(relay_to_streamer) Task exiting");
-        })
-    };
-
-    // Wait for relay tasks to complete (they won't unless an error occurs or the
-    // socket is closed).
-    tokio::select! {
-        res = relay_to_destination => {
-            if let Err(e) = res {
-                error!("relay_to_destination task failed: {}", e);
-            }
-        }
-        res = relay_to_streamer => {
-            if let Err(e) = res {
-                error!("relay_to_streamer task failed: {}", e);
-            }
-        }
-    }
-
-    Ok(())
 }
