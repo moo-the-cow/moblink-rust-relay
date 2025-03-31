@@ -11,9 +11,7 @@ use packet::{ip, udp};
 use packet::{Builder as _, Packet as _};
 use rand::distr::{Alphanumeric, SampleString};
 use std::collections::HashMap;
-use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -37,18 +35,6 @@ type TunWriter = SplitSink<Framed<AsyncDevice, TunPacketCodec>, Vec<u8>>;
 type TunReader = SplitStream<Framed<AsyncDevice, TunPacketCodec>>;
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
-
-pub type TunnelCreatedClosure = Box<
-    dyn Fn(String, String, String, u16) -> Pin<Box<dyn Future<Output = ()> + Send + Sync>>
-        + Send
-        + Sync,
->;
-
-pub type TunnelDestroyedClosure = Box<
-    dyn Fn(String, String, String, u16) -> Pin<Box<dyn Future<Output = ()> + Send + Sync>>
-        + Send
-        + Sync,
->;
 
 #[derive(Debug)]
 struct PacketBuilder {
@@ -287,7 +273,6 @@ impl Relay {
             self.relay_id
         );
         self.start_udp_networking(relay_tunnel_port).await?;
-        self.call_tunnel_created(relay_tunnel_port).await;
         Ok(())
     }
 
@@ -303,39 +288,6 @@ impl Relay {
             self.relay_id
         );
         self.stop_udp_networking().await;
-        self.call_tunnel_destroyed(relay_tunnel_port).await;
-    }
-
-    async fn call_tunnel_created(&self, relay_tunnel_port: u16) {
-        let Some(streamer) = self.streamer.upgrade() else {
-            return;
-        };
-        let Some(tunnel_created) = &streamer.lock().await.tunnel_created else {
-            return;
-        };
-        tunnel_created(
-            self.relay_id.clone(),
-            self.relay_name.clone(),
-            self.relay_address.ip().to_string(),
-            relay_tunnel_port,
-        )
-        .await;
-    }
-
-    async fn call_tunnel_destroyed(&self, relay_tunnel_port: u16) {
-        let Some(streamer) = self.streamer.upgrade() else {
-            return;
-        };
-        let Some(tunnel_destroyed) = &streamer.lock().await.tunnel_destroyed else {
-            return;
-        };
-        tunnel_destroyed(
-            self.relay_id.clone(),
-            self.relay_name.clone(),
-            self.relay_address.ip().to_string(),
-            relay_tunnel_port,
-        )
-        .await;
     }
 
     async fn start_udp_networking(&mut self, relay_tunnel_port: u16) -> Result<(), AnyError> {
@@ -672,8 +624,6 @@ pub struct Streamer {
     password: String,
     destination_address: String,
     destination_port: u16,
-    tunnel_created: Option<TunnelCreatedClosure>,
-    tunnel_destroyed: Option<TunnelDestroyedClosure>,
     relays: Vec<Arc<Mutex<Relay>>>,
     linux_networking_table_offset: u32,
     tun_ip_addresses: Vec<String>,
@@ -688,8 +638,6 @@ impl Streamer {
         password: String,
         destination_address: String,
         destination_port: u16,
-        tunnel_created: Option<TunnelCreatedClosure>,
-        tunnel_destroyed: Option<TunnelDestroyedClosure>,
     ) -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
@@ -701,8 +649,6 @@ impl Streamer {
                 password,
                 destination_address,
                 destination_port,
-                tunnel_created,
-                tunnel_destroyed,
                 relays: Vec::new(),
                 linux_networking_table_offset: 0,
                 tun_ip_addresses: (1..20).map(|i| format!("10.0.0.{}", i)).collect(),
