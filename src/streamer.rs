@@ -85,7 +85,7 @@ struct Relay {
     tun_ip_address: String,
     relay_receiver: Option<JoinHandle<()>>,
     tun_receiver: Option<JoinHandle<()>>,
-    linux_networking_table: u32,
+    unique_index: u32,
     pong_received: bool,
 }
 
@@ -95,7 +95,7 @@ impl Relay {
         relay_address: SocketAddr,
         writer: WebSocketWriter,
         tun_ip_address: String,
-        linux_networking_table: u32,
+        unique_index: u32,
     ) -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
@@ -112,7 +112,7 @@ impl Relay {
                 tun_ip_address,
                 relay_receiver: None,
                 tun_receiver: None,
-                linux_networking_table,
+                unique_index,
                 pong_received: true,
             })
         })
@@ -342,7 +342,7 @@ impl Relay {
 
     #[cfg(target_os = "macos")]
     fn tun_device_name(&self) -> String {
-        format!("utun{}", 99)
+        format!("utun{}", 99 + self.unique_index)
     }
 
     async fn setup_os_networking(&self) {
@@ -419,7 +419,7 @@ impl Relay {
     }
 
     fn get_linux_networking_table(&self) -> String {
-        format!("{}", self.linux_networking_table)
+        format!("{}", 300 + self.unique_index)
     }
 
     async fn start_tun_receiver(
@@ -625,7 +625,7 @@ pub struct Streamer {
     destination_address: String,
     destination_port: u16,
     relays: Vec<Arc<Mutex<Relay>>>,
-    linux_networking_table_offset: u32,
+    unique_index: u32,
     tun_ip_addresses: Vec<String>,
 }
 
@@ -650,8 +650,8 @@ impl Streamer {
                 destination_address,
                 destination_port,
                 relays: Vec::new(),
-                linux_networking_table_offset: 0,
-                tun_ip_addresses: (1..20).map(|i| format!("10.0.0.{}", i)).collect(),
+                unique_index: 0,
+                tun_ip_addresses: (1..20).rev().map(|i| format!("10.0.0.{}", i)).collect(),
             })
         })
     }
@@ -721,7 +721,7 @@ impl Streamer {
                     relay_address,
                     writer,
                     tun_ip_address,
-                    self.get_linux_networking_table(),
+                    self.get_unique_index(),
                 );
                 relay.lock().await.start(reader);
                 self.add_relay(relay);
@@ -732,10 +732,10 @@ impl Streamer {
         }
     }
 
-    fn get_linux_networking_table(&mut self) -> u32 {
-        self.linux_networking_table_offset += 1;
-        self.linux_networking_table_offset %= 4800;
-        300 + self.linux_networking_table_offset
+    fn get_unique_index(&mut self) -> u32 {
+        self.unique_index += 1;
+        self.unique_index %= 4800;
+        self.unique_index
     }
 
     fn add_relay(&mut self, relay: Arc<Mutex<Relay>>) {
