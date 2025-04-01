@@ -3,20 +3,19 @@ use crate::protocol::{
     MessageRequestData, MessageResponse, MessageToRelay, MessageToStreamer, MoblinkResult, Present,
     ResponseData, StartTunnelRequest, API_VERSION,
 };
+use crate::utils::{execute_command, random_string, AnyError};
 use crate::MDNS_SERVICE_TYPE;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use packet::{ip, udp};
 use packet::{Builder as _, Packet as _};
-use rand::distr::{Alphanumeric, SampleString};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::process::Command;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -33,8 +32,6 @@ type WebSocketReader = SplitStream<WebSocketStream<TcpStream>>;
 
 type TunWriter = SplitSink<Framed<AsyncDevice, TunPacketCodec>, Vec<u8>>;
 type TunReader = SplitStream<Framed<AsyncDevice, TunPacketCodec>>;
-
-type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug)]
 struct PacketBuilder {
@@ -753,28 +750,4 @@ impl Streamer {
     fn log_number_of_relays(&self) {
         info!("Number of relays: {}", self.relays.len())
     }
-}
-
-fn random_string() -> String {
-    Alphanumeric.sample_string(&mut rand::rng(), 64)
-}
-
-async fn execute_command(executable: &str, args: &[&str]) {
-    let command = format_command(executable, args);
-    match Command::new(executable).args(args).status().await {
-        Ok(status) => {
-            if status.success() {
-                info!("Command '{}' succeeded!", command);
-            } else {
-                warn!("Command '{}' failed with status {}", command, status);
-            }
-        }
-        Err(error) => {
-            error!("Command '{}' failed with error: {}", command, error);
-        }
-    }
-}
-
-fn format_command(executable: &str, args: &[&str]) -> String {
-    format!("{} {}", executable, args.join(" "))
 }
