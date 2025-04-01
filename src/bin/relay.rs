@@ -1,12 +1,11 @@
-use moblink_rust::{relay, MDNS_SERVICE_TYPE};
-use std::time::Duration;
-use tokio::{fs::File, io::AsyncReadExt, process::Command};
-use uuid::Uuid;
-
 use clap::Parser;
 use log::{error, info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
+use moblink_rust::{relay, MDNS_SERVICE_TYPE};
 use relay::GetStatusClosure;
+use std::time::Duration;
+use tokio::{fs::File, io::AsyncReadExt, process::Command};
+use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

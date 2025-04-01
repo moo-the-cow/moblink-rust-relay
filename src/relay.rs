@@ -1,22 +1,20 @@
+use crate::protocol::*;
+use crate::utils::AnyError;
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
+use log::{debug, error, info};
 use serde::Deserialize;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
-use uuid::Uuid;
-
-use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
-
-use crate::protocol::*;
-use crate::utils::AnyError;
+use uuid::Uuid;
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]

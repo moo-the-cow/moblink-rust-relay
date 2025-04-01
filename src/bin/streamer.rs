@@ -1,8 +1,6 @@
-use std::time::Duration;
-
-use moblink_rust::streamer;
-
 use clap::Parser;
+use moblink_rust::streamer;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

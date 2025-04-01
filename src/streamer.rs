@@ -9,6 +9,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use ipnetwork::Ipv4Network;
 use log::{debug, error, info};
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use packet::{ip, udp};
 use packet::{Builder as _, Packet as _};
 use std::collections::HashMap;
@@ -26,8 +27,6 @@ use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
 use tun::{self, AsyncDevice, TunPacketCodec};
 use uuid::Uuid;
-
-use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 type WebSocketWriter = SplitSink<WebSocketStream<TcpStream>, Message>;
 type WebSocketReader = SplitStream<WebSocketStream<TcpStream>>;
