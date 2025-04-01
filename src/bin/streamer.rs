@@ -1,7 +1,8 @@
+use std::time::Duration;
+
 use clap::Parser;
 use gethostname::gethostname;
 use moblink_rust::streamer;
-use std::time::Duration;
 
 fn hostname() -> String {
     gethostname().to_str().unwrap_or("Moblink").to_string()

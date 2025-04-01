@@ -1,20 +1,22 @@
-use crate::protocol::*;
-use crate::utils::AnyError;
-use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info};
-use serde::Deserialize;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
+
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
+use log::{debug, error, info};
+use serde::Deserialize;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use uuid::Uuid;
+
+use crate::protocol::*;
+use crate::utils::AnyError;
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -184,10 +186,13 @@ impl Relay {
                 match result {
                     Ok(message) => match message {
                         Message::Text(text) => {
-                            if let Ok(message) = serde_json::from_str::<MessageToRelay>(&text) {
-                                relay.handle_message(message).await.ok();
-                            } else {
-                                error!("Failed to deserialize message: {}", text);
+                            match serde_json::from_str::<MessageToRelay>(&text) {
+                                Ok(message) => {
+                                    relay.handle_message(message).await.ok();
+                                }
+                                _ => {
+                                    error!("Failed to deserialize message: {}", text);
+                                }
                             }
                         }
                         Message::Binary(data) => {
@@ -226,10 +231,13 @@ impl Relay {
     async fn stop_internal(&mut self) {
         info!("Stop internal");
         if let Some(mut ws_writer) = self.ws_writer.take() {
-            if let Err(e) = ws_writer.close().await {
-                error!("Error closing WebSocket: {}", e);
-            } else {
-                info!("WebSocket closed successfully");
+            match ws_writer.close().await {
+                Err(e) => {
+                    error!("Error closing WebSocket: {}", e);
+                }
+                _ => {
+                    info!("WebSocket closed successfully");
+                }
             }
         }
         self.connected = false;

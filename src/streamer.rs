@@ -1,32 +1,33 @@
-use crate::protocol::{
-    calculate_authentication, Authentication, Hello, Identified, Identify, MessageRequest,
-    MessageRequestData, MessageResponse, MessageToRelay, MessageToStreamer, MoblinkResult, Present,
-    ResponseData, StartTunnelRequest, API_VERSION,
-};
-use crate::utils::{execute_command, random_string, AnyError};
-use crate::MDNS_SERVICE_TYPE;
-use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{SinkExt, StreamExt};
-use ipnetwork::Ipv4Network;
-use log::{debug, error, info};
-use mdns_sd::{ServiceDaemon, ServiceInfo};
-use packet::{ip, udp};
-use packet::{Builder as _, Packet as _};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
+
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
+use ipnetwork::Ipv4Network;
+use log::{debug, error, info};
+use mdns_sd::{ServiceDaemon, ServiceInfo};
+use packet::{Builder as _, Packet as _, ip, udp};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
 use tun::{self, AsyncDevice, TunPacketCodec};
 use uuid::Uuid;
+
+use crate::MDNS_SERVICE_TYPE;
+use crate::protocol::{
+    API_VERSION, Authentication, Hello, Identified, Identify, MessageRequest, MessageRequestData,
+    MessageResponse, MessageToRelay, MessageToStreamer, MoblinkResult, Present, ResponseData,
+    StartTunnelRequest, calculate_authentication,
+};
+use crate::utils::{AnyError, execute_command, random_string};
 
 type WebSocketWriter = SplitSink<WebSocketStream<TcpStream>, Message>;
 type WebSocketReader = SplitStream<WebSocketStream<TcpStream>>;
@@ -356,51 +357,42 @@ impl Relay {
         let destination_address = &streamer.lock().await.destination_address;
         let table = self.get_linux_networking_table();
         self.teardown_linux_networking().await;
-        execute_command(
-            "ip",
-            &[
-                "route",
-                "add",
-                destination_address,
-                "dev",
-                &self.tun_device_name(),
-                "proto",
-                "kernel",
-                "scope",
-                "link",
-                "src",
-                &self.tun_ip_address,
-                "table",
-                &table,
-            ],
-        )
+        execute_command("ip", &[
+            "route",
+            "add",
+            destination_address,
+            "dev",
+            &self.tun_device_name(),
+            "proto",
+            "kernel",
+            "scope",
+            "link",
+            "src",
+            &self.tun_ip_address,
+            "table",
+            &table,
+        ])
         .await;
-        execute_command(
-            "ip",
-            &[
-                "route",
-                "add",
-                "default",
-                "via",
-                &self.tun_ip_address,
-                "dev",
-                &self.tun_device_name(),
-                "table",
-                &table,
-            ],
-        )
+        execute_command("ip", &[
+            "route",
+            "add",
+            "default",
+            "via",
+            &self.tun_ip_address,
+            "dev",
+            &self.tun_device_name(),
+            "table",
+            &table,
+        ])
         .await;
-        execute_command(
-            "ip",
-            &[
-                "rule",
-                "add",
-                "from",
-                &self.tun_ip_address,
-                "lookup",
-                &table,
-            ],
-        )
+        execute_command("ip", &[
+            "rule",
+            "add",
+            "from",
+            &self.tun_ip_address,
+            "lookup",
+            &table,
+        ])
         .await;
     }
 
@@ -604,10 +596,13 @@ impl Relay {
     }
 
     async fn send_websocket(&mut self, message: Message) -> Result<(), AnyError> {
-        if let Some(writer) = self.writer.as_mut() {
-            writer.send(message).await?;
-        } else {
-            return Err("No websocket writer".into());
+        match self.writer.as_mut() {
+            Some(writer) => {
+                writer.send(message).await?;
+            }
+            _ => {
+                return Err("No websocket writer".into());
+            }
         }
         Ok(())
     }
@@ -669,14 +664,17 @@ impl Streamer {
             }
 
             while let Ok((tcp_stream, relay_address)) = listener.accept().await {
-                if let Some(streamer) = streamer.upgrade() {
-                    streamer
-                        .lock()
-                        .await
-                        .handle_relay_connection(tcp_stream, relay_address)
-                        .await;
-                } else {
-                    break;
+                match streamer.upgrade() {
+                    Some(streamer) => {
+                        streamer
+                            .lock()
+                            .await
+                            .handle_relay_connection(tcp_stream, relay_address)
+                            .await;
+                    }
+                    _ => {
+                        break;
+                    }
                 }
             }
         });

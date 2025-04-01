@@ -1,10 +1,13 @@
+use std::time::Duration;
+
 use clap::Parser;
 use log::{error, info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
-use moblink_rust::{relay, MDNS_SERVICE_TYPE};
+use moblink_rust::{MDNS_SERVICE_TYPE, relay};
 use relay::GetStatusClosure;
-use std::time::Duration;
-use tokio::{fs::File, io::AsyncReadExt, process::Command};
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -206,7 +209,10 @@ async fn run_automatic(args: Args, relay_id: Uuid) {
         }
     });
 
-    if let Err(e) = mdns_task.await {
-        warn!("mDNS task failed: {:?}", e);
+    match mdns_task.await {
+        Err(e) => {
+            warn!("mDNS task failed: {:?}", e);
+        }
+        _ => {}
     }
 }
