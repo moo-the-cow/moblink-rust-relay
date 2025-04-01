@@ -624,7 +624,7 @@ pub struct Streamer {
     destination_port: u16,
     relays: Vec<Arc<Mutex<Relay>>>,
     unique_indexes: Vec<u32>,
-    tun_ip_addresses: Vec<String>,
+    tun_ip_network: Ipv4Network,
 }
 
 impl Streamer {
@@ -638,7 +638,7 @@ impl Streamer {
         destination_address: String,
         destination_port: u16,
     ) -> Result<Arc<Mutex<Self>>, Box<dyn std::error::Error + Send + Sync>> {
-        let tun_ip_addresses = parse_tun_ip_network(&tun_ip_network)?;
+        let tun_ip_network = parse_tun_ip_network(&tun_ip_network)?;
         Ok(Arc::new_cyclic(|me| {
             Mutex::new(Self {
                 me: me.clone(),
@@ -650,8 +650,8 @@ impl Streamer {
                 destination_address,
                 destination_port,
                 relays: Vec::new(),
-                unique_indexes: (0..255).collect(),
-                tun_ip_addresses,
+                unique_indexes: (0..tun_ip_network.size() - 1).collect(),
+                tun_ip_network,
             })
         }))
     }
@@ -711,17 +711,18 @@ impl Streamer {
             Ok(websocket_stream) => {
                 info!("Relay connected: {}", relay_address);
                 let (writer, reader) = websocket_stream.split();
-                let Some(tun_ip_address) = self.tun_ip_addresses.pop() else {
+                let Some(unique_index) = self.unique_indexes.pop() else {
                     return;
                 };
-                let Some(unique_index) = self.unique_indexes.pop() else {
+                let Some(tun_ip_address) = self.tun_ip_network.nth(unique_index) else {
+                    self.unique_indexes.insert(0, unique_index);
                     return;
                 };
                 let relay = Relay::new(
                     self.me.clone(),
                     relay_address,
                     writer,
-                    tun_ip_address,
+                    tun_ip_address.to_string(),
                     unique_index,
                 );
                 relay.lock().await.start(reader);
@@ -739,9 +740,7 @@ impl Streamer {
     }
 
     async fn remove_relay(&mut self, relay: &Arc<Mutex<Relay>>) {
-        let tun_ip_address = relay.lock().await.tun_ip_address.clone();
         let unique_index = relay.lock().await.unique_index;
-        self.tun_ip_addresses.insert(0, tun_ip_address);
         self.unique_indexes.insert(0, unique_index);
         self.relays.retain(|r| !Arc::ptr_eq(r, relay));
         self.log_number_of_relays();
@@ -752,13 +751,10 @@ impl Streamer {
     }
 }
 
-fn parse_tun_ip_network(network: &str) -> Result<Vec<String>, AnyError> {
+fn parse_tun_ip_network(network: &str) -> Result<Ipv4Network, AnyError> {
     let network: Ipv4Network = network.parse()?;
     if network.size() > 256 {
         return Err(format!("TUN IP network too big ({} > 256)", network.size()).into());
     }
-    Ok(network
-        .iter()
-        .map(|ip_address| ip_address.to_string())
-        .collect())
+    Ok(network)
 }
