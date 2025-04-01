@@ -39,3 +39,4 @@ tun = {version = "0.7.17", features = ["async"] }
 packet = "0.1.4"
 tokio-util = "0.7.14"
 ipnetwork = "0.21.1"
+gethostname = "1.0.1"
