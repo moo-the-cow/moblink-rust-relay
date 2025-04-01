@@ -685,9 +685,7 @@ impl Streamer {
         Ok(())
     }
 
-    fn create_mdns_service(
-        &self,
-    ) -> Result<(ServiceDaemon, ServiceInfo), Box<dyn std::error::Error + Send + Sync>> {
+    fn create_mdns_service(&self) -> Result<(ServiceDaemon, ServiceInfo), AnyError> {
         let service_daemon = ServiceDaemon::new()?;
         let properties = HashMap::from([("name".to_string(), self.name.clone())]);
         let service_info = ServiceInfo::new(
