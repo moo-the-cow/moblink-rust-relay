@@ -13,11 +13,11 @@ name = "moblink_rust"
 path = "src/lib.rs"
 
 [[bin]]
-name = "moblink-rust-relay"
+name = "moblink-relay"
 path = "src/bin/relay.rs"
 
 [[bin]]
-name = "moblink-rust-streamer"
+name = "moblink-streamer"
 path = "src/bin/streamer.rs"
 
 [dependencies]

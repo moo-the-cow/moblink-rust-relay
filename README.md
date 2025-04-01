@@ -30,7 +30,7 @@ rustup override set nightly
 cargo build --release
 
 # 3. Run the relay
-./target/release/moblink-rust-relay \
+./target/release/moblink-relay \
   --name "RelayName" \
   --id "UUID" \
   --streamer-url ws://192.168.1.2:7777 \
