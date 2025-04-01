@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use clap::Parser;
+use gethostname::gethostname;
 use log::{error, info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use moblink_rust::{MDNS_SERVICE_TYPE, relay};
@@ -10,11 +11,15 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use uuid::Uuid;
 
+fn hostname() -> String {
+    gethostname().to_str().unwrap_or("Moblink").to_string()
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Name to identify the relay
-    #[arg(short, long, default_value = "Relay")]
+    #[arg(short, long, default_value_t = hostname())]
     name: String,
 
     /// Relay ID (valid UUID)
@@ -26,7 +31,7 @@ struct Args {
     streamer_url: Option<String>,
 
     /// Password
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "1234")]
     password: String,
 
     /// Bind address
