@@ -15,6 +15,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use crate::protocol::*;
+use crate::utils::AnyError;
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -279,10 +280,7 @@ impl Relay {
         });
     }
 
-    async fn handle_message(
-        &mut self,
-        message: MessageToRelay,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message(&mut self, message: MessageToRelay) -> Result<(), AnyError> {
         match message {
             MessageToRelay::Hello(hello) => self.handle_message_hello(hello).await,
             MessageToRelay::Identified(identified) => {
@@ -292,10 +290,7 @@ impl Relay {
         }
     }
 
-    async fn handle_message_hello(
-        &mut self,
-        hello: Hello,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message_hello(&mut self, hello: Hello) -> Result<(), AnyError> {
         let authentication = calculate_authentication(
             &self.password,
             &hello.authentication.salt,
@@ -309,10 +304,7 @@ impl Relay {
         self.send(MessageToStreamer::Identify(identify)).await
     }
 
-    async fn handle_message_identified(
-        &mut self,
-        identified: Identified,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message_identified(&mut self, identified: Identified) -> Result<(), AnyError> {
         match identified.result {
             MoblinkResult::Ok(_) => {
                 self.connected = true;
@@ -325,10 +317,7 @@ impl Relay {
         Ok(())
     }
 
-    async fn handle_message_request(
-        &mut self,
-        request: MessageRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message_request(&mut self, request: MessageRequest) -> Result<(), AnyError> {
         match &request.data {
             MessageRequestData::StartTunnel(start_tunnel) => {
                 self.handle_message_request_start_tunnel(&request, start_tunnel)
@@ -342,7 +331,7 @@ impl Relay {
         &mut self,
         request: &MessageRequest,
         start_tunnel: &StartTunnelRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), AnyError> {
         // Pick bind addresses from the relay
         let local_bind_addr_for_streamer = parse_socket_addr("0.0.0.0")?;
         let local_bind_addr_for_destination = parse_socket_addr(&self.bind_address)?;
@@ -444,7 +433,7 @@ impl Relay {
     async fn handle_message_request_status(
         &mut self,
         request: MessageRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), AnyError> {
         let Some(get_status) = self.get_status.as_ref() else {
             error!("get_battery_percentage is not set");
             return Err("get_battery_percentage function not set".into());
@@ -457,18 +446,12 @@ impl Relay {
         self.send(MessageToStreamer::Response(response)).await
     }
 
-    async fn send(
-        &mut self,
-        message: MessageToStreamer,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn send(&mut self, message: MessageToStreamer) -> Result<(), AnyError> {
         let text = serde_json::to_string(&message)?;
         self.send_message(Message::Text(text.into())).await
     }
 
-    async fn send_message(
-        &mut self,
-        message: Message,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn send_message(&mut self, message: Message) -> Result<(), AnyError> {
         let Some(writer) = self.ws_writer.as_mut() else {
             return Err("No websocket writer".into());
         };
