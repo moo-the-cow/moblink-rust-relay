@@ -35,16 +35,6 @@ struct Args {
     #[arg(long)]
     destination_port: u16,
 
-    /// Tunnel via relay created executable.
-    /// Called with --relay-id <id> --relay-name <name> --address <address> --port <port>.
-    #[arg(long)]
-    tunnel_created: Option<String>,
-
-    /// Tunnel via relay destroyed executable.
-    /// Called with --relay-id <id> --relay-name <name> --address <address> --port <port>.
-    #[arg(long)]
-    tunnel_destroyed: Option<String>,
-
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
