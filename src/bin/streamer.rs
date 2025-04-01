@@ -19,7 +19,7 @@ struct Args {
     #[arg(long)]
     password: String,
 
-    /// Websocket server listener address. Used for mDNS as well right now.
+    /// Websocket server listener address. Used for mDNS-SD as well right now.
     #[arg(long)]
     websocket_server_address: String,
 
