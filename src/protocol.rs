@@ -2,6 +2,7 @@ use base64::engine::general_purpose;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 pub const API_VERSION: &str = "1.0";
 
@@ -91,7 +92,7 @@ pub struct MessageResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Identify {
-    pub id: String,
+    pub id: Uuid,
     pub name: String,
     pub authentication: String,
 }

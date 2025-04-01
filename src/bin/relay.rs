@@ -1,6 +1,7 @@
 use moblink_rust::{relay, MDNS_SERVICE_TYPE};
 use std::time::Duration;
 use tokio::{fs::File, io::AsyncReadExt, process::Command};
+use uuid::Uuid;
 
 use clap::Parser;
 use log::{error, info, warn};
@@ -16,7 +17,7 @@ struct Args {
 
     /// Relay ID (valid UUID)
     #[arg(short, long)]
-    id: Option<String>,
+    id: Option<Uuid>,
 
     /// Streamer URL (websocket) - optional if using mDNS
     #[arg(short = 'u', long)]
@@ -96,7 +97,7 @@ fn create_get_status_closure(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     setup_logging(&args.log_level);
-    let relay_id = args.id.clone().unwrap_or(uuid::Uuid::new_v4().to_string());
+    let relay_id = args.id.unwrap_or(Uuid::new_v4());
 
     if let Some(streamer_url) = args.streamer_url.clone() {
         run_manual(args, relay_id, streamer_url).await;
@@ -107,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_manual(args: Args, relay_id: String, streamer_url: String) {
+async fn run_manual(args: Args, relay_id: Uuid, streamer_url: String) {
     let relay = relay::Relay::new();
 
     if !args.bind_address.is_empty() {
@@ -133,7 +134,7 @@ async fn run_manual(args: Args, relay_id: String, streamer_url: String) {
     }
 }
 
-async fn run_automatic(args: Args, relay_id: String) {
+async fn run_automatic(args: Args, relay_id: Uuid) {
     let mdns_task = tokio::spawn(async move {
         let mut retries = 0;
 
@@ -177,7 +178,7 @@ async fn run_automatic(args: Args, relay_id: String) {
                                 .setup(
                                     streamer_url,
                                     args.password.clone(),
-                                    relay_id.clone(),
+                                    relay_id,
                                     args.name.clone(),
                                     |status| info!("Status: {}", status),
                                     create_get_status_closure(

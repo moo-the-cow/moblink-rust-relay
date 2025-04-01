@@ -24,6 +24,7 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
 use tun::{self, AsyncDevice, TunPacketCodec};
+use uuid::Uuid;
 
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
@@ -76,7 +77,7 @@ struct Relay {
     challenge: String,
     salt: String,
     identified: bool,
-    relay_id: String,
+    relay_id: Uuid,
     relay_name: String,
     relay_tunnel_port: Option<u16>,
     tun_ip_address: String,
@@ -103,7 +104,7 @@ impl Relay {
                 challenge: String::new(),
                 salt: String::new(),
                 identified: false,
-                relay_id: "".into(),
+                relay_id: Uuid::new_v4(),
                 relay_name: "".into(),
                 relay_tunnel_port: None,
                 tun_ip_address,

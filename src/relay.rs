@@ -4,6 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
+use uuid::Uuid;
 
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -30,7 +31,7 @@ pub struct Relay {
     me: Weak<Mutex<Self>>,
     /// Store a local IP address  for binding UDP sockets
     bind_address: String,
-    relay_id: String,
+    relay_id: Uuid,
     streamer_url: String,
     password: String,
     name: String,
@@ -50,7 +51,7 @@ impl Relay {
             Mutex::new(Self {
                 me: me.clone(),
                 bind_address: Self::get_default_bind_address(),
-                relay_id: "".to_string(),
+                relay_id: Uuid::new_v4(),
                 streamer_url: "".to_string(),
                 password: "".to_string(),
                 name: "".to_string(),
@@ -74,7 +75,7 @@ impl Relay {
         &mut self,
         streamer_url: String,
         password: String,
-        relay_id: String,
+        relay_id: Uuid,
         name: String,
         on_status_updated: F,
         get_status: GetStatusClosure,
@@ -297,7 +298,7 @@ impl Relay {
             &hello.authentication.challenge,
         );
         let identify = Identify {
-            id: self.relay_id.clone(),
+            id: self.relay_id,
             name: self.name.clone(),
             authentication,
         };
