@@ -7,6 +7,7 @@ use crate::utils::{execute_command, random_string, AnyError};
 use crate::MDNS_SERVICE_TYPE;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use ipnetwork::Ipv4Network;
 use log::{debug, error, info};
 use packet::{ip, udp};
 use packet::{Builder as _, Packet as _};
@@ -633,11 +634,13 @@ impl Streamer {
         name: String,
         address: String,
         port: u16,
+        tun_ip_network: String,
         password: String,
         destination_address: String,
         destination_port: u16,
-    ) -> Arc<Mutex<Self>> {
-        Arc::new_cyclic(|me| {
+    ) -> Result<Arc<Mutex<Self>>, Box<dyn std::error::Error + Send + Sync>> {
+        let tun_ip_addresses = parse_tun_ip_network(&tun_ip_network)?;
+        Ok(Arc::new_cyclic(|me| {
             Mutex::new(Self {
                 me: me.clone(),
                 id,
@@ -649,12 +652,12 @@ impl Streamer {
                 destination_port,
                 relays: Vec::new(),
                 unique_index: 0,
-                tun_ip_addresses: (1..20).rev().map(|i| format!("10.0.0.{}", i)).collect(),
+                tun_ip_addresses,
             })
-        })
+        }))
     }
 
-    pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener_address = format!("{}:{}", self.address, self.port);
         let listener = TcpListener::bind(&listener_address).await?;
         info!("WebSocket server listening on '{}'", listener_address);
@@ -684,7 +687,7 @@ impl Streamer {
 
     fn create_mdns_service(
         &self,
-    ) -> Result<(ServiceDaemon, ServiceInfo), Box<dyn std::error::Error>> {
+    ) -> Result<(ServiceDaemon, ServiceInfo), Box<dyn std::error::Error + Send + Sync>> {
         let service_daemon = ServiceDaemon::new()?;
         let properties = HashMap::from([("name".to_string(), self.name.clone())]);
         let service_info = ServiceInfo::new(
@@ -751,4 +754,15 @@ impl Streamer {
     fn log_number_of_relays(&self) {
         info!("Number of relays: {}", self.relays.len())
     }
+}
+
+fn parse_tun_ip_network(network: &str) -> Result<Vec<String>, AnyError> {
+    let network: Ipv4Network = network.parse()?;
+    if network.size() > 256 {
+        return Err(format!("TUN IP network too big ({} > 256)", network.size()).into());
+    }
+    Ok(network
+        .iter()
+        .map(|ip_address| ip_address.to_string())
+        .collect())
 }

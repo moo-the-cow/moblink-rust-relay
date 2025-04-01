@@ -27,6 +27,11 @@ struct Args {
     #[arg(long)]
     websocket_server_port: u16,
 
+    /// TUN IP network (CIDR notation).
+    /// TUN network interfaces will be assigned IP addresses from this network.
+    #[arg(long, default_value = "10.3.3.0/24")]
+    tun_ip_network: String,
+
     /// Streaming destination address
     #[arg(long)]
     destination_address: String,
@@ -49,7 +54,7 @@ fn setup_logging(log_level: &str) {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
     setup_logging(&args.log_level);
 
@@ -58,10 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.name,
         args.websocket_server_address,
         args.websocket_server_port,
+        args.tun_ip_network,
         args.password,
         args.destination_address,
         args.destination_port,
-    );
+    )?;
     streamer.lock().await.start().await?;
 
     loop {
