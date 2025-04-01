@@ -1,4 +1,4 @@
-# Moblink Rust Relay
+# Moblink (Rust🦀 edition)
 
 Use spare devices as extra SRTLA bonding connections. The same functionality is part of [Moblin](https://github.com/eerimoq/moblin) on iOS.
 
@@ -13,15 +13,15 @@ Originally inspired by the Moblink Kotlin/Android code.
 
 ## Requirements
 
-- **Rust** (stable, e.g., 1.70+)
+- **Rust** (stable, e.g., 1.85+)
 - **Cargo** (for building)
 
 ## Usage
 
 ```bash
 # 1. Clone this repository (or copy the code)
-git clone https://github.com/datagutt/moblink-rust-relay.git
-cd moblink-rust-relay
+git clone https://github.com/datagutt/moblink-rust.git
+cd moblink-rust
 
 # Set nightly (optional)
 rustup override set nightly
@@ -82,4 +82,4 @@ Please start multiple instances of the relay for each interface.
 
 **License**: This project is distributed under the terms of the MIT license.
 
-Enjoy using **Moblink Rust Relay**!
+Enjoy using **Moblink**!
