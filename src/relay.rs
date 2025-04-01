@@ -1,20 +1,20 @@
+use crate::protocol::*;
+use crate::utils::AnyError;
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
+use log::{debug, error, info};
 use serde::Deserialize;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
-
-use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
-
-use crate::protocol::*;
+use uuid::Uuid;
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,7 +29,7 @@ pub struct Relay {
     me: Weak<Mutex<Self>>,
     /// Store a local IP address  for binding UDP sockets
     bind_address: String,
-    relay_id: String,
+    relay_id: Uuid,
     streamer_url: String,
     password: String,
     name: String,
@@ -49,7 +49,7 @@ impl Relay {
             Mutex::new(Self {
                 me: me.clone(),
                 bind_address: Self::get_default_bind_address(),
-                relay_id: "".to_string(),
+                relay_id: Uuid::new_v4(),
                 streamer_url: "".to_string(),
                 password: "".to_string(),
                 name: "".to_string(),
@@ -73,7 +73,7 @@ impl Relay {
         &mut self,
         streamer_url: String,
         password: String,
-        relay_id: String,
+        relay_id: Uuid,
         name: String,
         on_status_updated: F,
         get_status: GetStatusClosure,
@@ -279,10 +279,7 @@ impl Relay {
         });
     }
 
-    async fn handle_message(
-        &mut self,
-        message: MessageToRelay,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message(&mut self, message: MessageToRelay) -> Result<(), AnyError> {
         match message {
             MessageToRelay::Hello(hello) => self.handle_message_hello(hello).await,
             MessageToRelay::Identified(identified) => {
@@ -292,27 +289,21 @@ impl Relay {
         }
     }
 
-    async fn handle_message_hello(
-        &mut self,
-        hello: Hello,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message_hello(&mut self, hello: Hello) -> Result<(), AnyError> {
         let authentication = calculate_authentication(
             &self.password,
             &hello.authentication.salt,
             &hello.authentication.challenge,
         );
         let identify = Identify {
-            id: self.relay_id.clone(),
+            id: self.relay_id,
             name: self.name.clone(),
             authentication,
         };
         self.send(MessageToStreamer::Identify(identify)).await
     }
 
-    async fn handle_message_identified(
-        &mut self,
-        identified: Identified,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message_identified(&mut self, identified: Identified) -> Result<(), AnyError> {
         match identified.result {
             MoblinkResult::Ok(_) => {
                 self.connected = true;
@@ -325,10 +316,7 @@ impl Relay {
         Ok(())
     }
 
-    async fn handle_message_request(
-        &mut self,
-        request: MessageRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message_request(&mut self, request: MessageRequest) -> Result<(), AnyError> {
         match &request.data {
             MessageRequestData::StartTunnel(start_tunnel) => {
                 self.handle_message_request_start_tunnel(&request, start_tunnel)
@@ -342,7 +330,7 @@ impl Relay {
         &mut self,
         request: &MessageRequest,
         start_tunnel: &StartTunnelRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), AnyError> {
         // Pick bind addresses from the relay
         let local_bind_addr_for_streamer = parse_socket_addr("0.0.0.0")?;
         let local_bind_addr_for_destination = parse_socket_addr(&self.bind_address)?;
@@ -444,7 +432,7 @@ impl Relay {
     async fn handle_message_request_status(
         &mut self,
         request: MessageRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), AnyError> {
         let Some(get_status) = self.get_status.as_ref() else {
             error!("get_battery_percentage is not set");
             return Err("get_battery_percentage function not set".into());
@@ -457,18 +445,12 @@ impl Relay {
         self.send(MessageToStreamer::Response(response)).await
     }
 
-    async fn send(
-        &mut self,
-        message: MessageToStreamer,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn send(&mut self, message: MessageToStreamer) -> Result<(), AnyError> {
         let text = serde_json::to_string(&message)?;
         self.send_message(Message::Text(text.into())).await
     }
 
-    async fn send_message(
-        &mut self,
-        message: Message,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn send_message(&mut self, message: Message) -> Result<(), AnyError> {
         let Some(writer) = self.ws_writer.as_mut() else {
             return Err("No websocket writer".into());
         };

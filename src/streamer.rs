@@ -3,20 +3,21 @@ use crate::protocol::{
     MessageRequestData, MessageResponse, MessageToRelay, MessageToStreamer, MoblinkResult, Present,
     ResponseData, StartTunnelRequest, API_VERSION,
 };
+use crate::utils::{execute_command, random_string, AnyError};
 use crate::MDNS_SERVICE_TYPE;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info, warn};
+use ipnetwork::Ipv4Network;
+use log::{debug, error, info};
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use packet::{ip, udp};
 use packet::{Builder as _, Packet as _};
-use rand::distr::{Alphanumeric, SampleString};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::process::Command;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -25,16 +26,13 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
 use tun::{self, AsyncDevice, TunPacketCodec};
-
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+use uuid::Uuid;
 
 type WebSocketWriter = SplitSink<WebSocketStream<TcpStream>, Message>;
 type WebSocketReader = SplitStream<WebSocketStream<TcpStream>>;
 
 type TunWriter = SplitSink<Framed<AsyncDevice, TunPacketCodec>, Vec<u8>>;
 type TunReader = SplitStream<Framed<AsyncDevice, TunPacketCodec>>;
-
-type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug)]
 struct PacketBuilder {
@@ -79,7 +77,7 @@ struct Relay {
     challenge: String,
     salt: String,
     identified: bool,
-    relay_id: String,
+    relay_id: Uuid,
     relay_name: String,
     relay_tunnel_port: Option<u16>,
     tun_ip_address: String,
@@ -106,7 +104,7 @@ impl Relay {
                 challenge: String::new(),
                 salt: String::new(),
                 identified: false,
-                relay_id: "".into(),
+                relay_id: Uuid::new_v4(),
                 relay_name: "".into(),
                 relay_tunnel_port: None,
                 tun_ip_address,
@@ -625,8 +623,8 @@ pub struct Streamer {
     destination_address: String,
     destination_port: u16,
     relays: Vec<Arc<Mutex<Relay>>>,
-    unique_index: u32,
-    tun_ip_addresses: Vec<String>,
+    unique_indexes: Vec<u32>,
+    tun_ip_network: Ipv4Network,
 }
 
 impl Streamer {
@@ -635,11 +633,13 @@ impl Streamer {
         name: String,
         address: String,
         port: u16,
+        tun_ip_network: String,
         password: String,
         destination_address: String,
         destination_port: u16,
-    ) -> Arc<Mutex<Self>> {
-        Arc::new_cyclic(|me| {
+    ) -> Result<Arc<Mutex<Self>>, Box<dyn std::error::Error + Send + Sync>> {
+        let tun_ip_network = parse_tun_ip_network(&tun_ip_network)?;
+        Ok(Arc::new_cyclic(|me| {
             Mutex::new(Self {
                 me: me.clone(),
                 id,
@@ -650,13 +650,13 @@ impl Streamer {
                 destination_address,
                 destination_port,
                 relays: Vec::new(),
-                unique_index: 0,
-                tun_ip_addresses: (1..20).rev().map(|i| format!("10.0.0.{}", i)).collect(),
+                unique_indexes: (0..tun_ip_network.size() - 1).collect(),
+                tun_ip_network,
             })
-        })
+        }))
     }
 
-    pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener_address = format!("{}:{}", self.address, self.port);
         let listener = TcpListener::bind(&listener_address).await?;
         info!("WebSocket server listening on '{}'", listener_address);
@@ -684,9 +684,7 @@ impl Streamer {
         Ok(())
     }
 
-    fn create_mdns_service(
-        &self,
-    ) -> Result<(ServiceDaemon, ServiceInfo), Box<dyn std::error::Error>> {
+    fn create_mdns_service(&self) -> Result<(ServiceDaemon, ServiceInfo), AnyError> {
         let service_daemon = ServiceDaemon::new()?;
         let properties = HashMap::from([("name".to_string(), self.name.clone())]);
         let service_info = ServiceInfo::new(
@@ -713,15 +711,19 @@ impl Streamer {
             Ok(websocket_stream) => {
                 info!("Relay connected: {}", relay_address);
                 let (writer, reader) = websocket_stream.split();
-                let Some(tun_ip_address) = self.tun_ip_addresses.pop() else {
+                let Some(unique_index) = self.unique_indexes.pop() else {
+                    return;
+                };
+                let Some(tun_ip_address) = self.tun_ip_network.nth(unique_index) else {
+                    self.unique_indexes.insert(0, unique_index);
                     return;
                 };
                 let relay = Relay::new(
                     self.me.clone(),
                     relay_address,
                     writer,
-                    tun_ip_address,
-                    self.get_unique_index(),
+                    tun_ip_address.to_string(),
+                    unique_index,
                 );
                 relay.lock().await.start(reader);
                 self.add_relay(relay);
@@ -732,20 +734,14 @@ impl Streamer {
         }
     }
 
-    fn get_unique_index(&mut self) -> u32 {
-        self.unique_index += 1;
-        self.unique_index %= 4800;
-        self.unique_index
-    }
-
     fn add_relay(&mut self, relay: Arc<Mutex<Relay>>) {
         self.relays.push(relay);
         self.log_number_of_relays();
     }
 
     async fn remove_relay(&mut self, relay: &Arc<Mutex<Relay>>) {
-        let tun_ip_address = relay.lock().await.tun_ip_address.clone();
-        self.tun_ip_addresses.insert(0, tun_ip_address);
+        let unique_index = relay.lock().await.unique_index;
+        self.unique_indexes.insert(0, unique_index);
         self.relays.retain(|r| !Arc::ptr_eq(r, relay));
         self.log_number_of_relays();
     }
@@ -755,26 +751,10 @@ impl Streamer {
     }
 }
 
-fn random_string() -> String {
-    Alphanumeric.sample_string(&mut rand::rng(), 64)
-}
-
-async fn execute_command(executable: &str, args: &[&str]) {
-    let command = format_command(executable, args);
-    match Command::new(executable).args(args).status().await {
-        Ok(status) => {
-            if status.success() {
-                info!("Command '{}' succeeded!", command);
-            } else {
-                warn!("Command '{}' failed with status {}", command, status);
-            }
-        }
-        Err(error) => {
-            error!("Command '{}' failed with error: {}", command, error);
-        }
+fn parse_tun_ip_network(network: &str) -> Result<Ipv4Network, AnyError> {
+    let network: Ipv4Network = network.parse()?;
+    if network.size() > 256 {
+        return Err(format!("TUN IP network too big ({} > 256)", network.size()).into());
     }
-}
-
-fn format_command(executable: &str, args: &[&str]) -> String {
-    format!("{} {}", executable, args.join(" "))
+    Ok(network)
 }

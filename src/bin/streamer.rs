@@ -1,31 +1,39 @@
+use clap::Parser;
+use gethostname::gethostname;
+use moblink_rust::streamer;
 use std::time::Duration;
 
-use moblink_rust::streamer;
-
-use clap::Parser;
+fn hostname() -> String {
+    gethostname().to_str().unwrap_or("Moblink").to_string()
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Id
-    #[arg(long)]
+    #[arg(long, default_value_t = hostname())]
     id: String,
 
     /// Name
-    #[arg(long)]
+    #[arg(long, default_value_t = hostname())]
     name: String,
 
     /// Password
-    #[arg(long)]
+    #[arg(long, default_value = "1234")]
     password: String,
 
-    /// Websocket server listener address. Used for mDNS as well right now.
+    /// Websocket server listener address. Used for mDNS-SD as well right now.
     #[arg(long)]
     websocket_server_address: String,
 
     /// Websocket server listener port
-    #[arg(long)]
+    #[arg(long, default_value = "7777")]
     websocket_server_port: u16,
+
+    /// TUN IP network (CIDR notation).
+    /// TUN network interfaces will be assigned IP addresses from this network.
+    #[arg(long, default_value = "10.3.3.0/24")]
+    tun_ip_network: String,
 
     /// Streaming destination address
     #[arg(long)]
@@ -34,16 +42,6 @@ struct Args {
     /// Streaming destination port
     #[arg(long)]
     destination_port: u16,
-
-    /// Tunnel via relay created executable.
-    /// Called with --relay-id <id> --relay-name <name> --address <address> --port <port>.
-    #[arg(long)]
-    tunnel_created: Option<String>,
-
-    /// Tunnel via relay destroyed executable.
-    /// Called with --relay-id <id> --relay-name <name> --address <address> --port <port>.
-    #[arg(long)]
-    tunnel_destroyed: Option<String>,
 
     /// Log level
     #[arg(long, default_value = "info")]
@@ -59,7 +57,7 @@ fn setup_logging(log_level: &str) {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
     setup_logging(&args.log_level);
 
@@ -68,10 +66,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.name,
         args.websocket_server_address,
         args.websocket_server_port,
+        args.tun_ip_network,
         args.password,
         args.destination_address,
         args.destination_port,
-    );
+    )?;
     streamer.lock().await.start().await?;
 
     loop {
