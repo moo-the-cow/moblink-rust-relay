@@ -6,7 +6,7 @@ use crate::protocol::{
 use crate::MDNS_SERVICE_TYPE;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use packet::{ip, udp};
 use packet::{Builder as _, Packet as _};
 use rand::distr::{Alphanumeric, SampleString};
@@ -760,5 +760,21 @@ fn random_string() -> String {
 }
 
 async fn execute_command(executable: &str, args: &[&str]) {
-    Command::new(executable).args(args).status().await.ok();
+    let command = format_command(executable, args);
+    match Command::new(executable).args(args).status().await {
+        Ok(status) => {
+            if status.success() {
+                info!("Command '{}' succeeded!", command);
+            } else {
+                warn!("Command '{}' failed with status {}", command, status);
+            }
+        }
+        Err(error) => {
+            error!("Command '{}' failed with error: {}", command, error);
+        }
+    }
+}
+
+fn format_command(executable: &str, args: &[&str]) -> String {
+    format!("{} {}", executable, args.join(" "))
 }
