@@ -623,7 +623,7 @@ pub struct Streamer {
     destination_address: String,
     destination_port: u16,
     relays: Vec<Arc<Mutex<Relay>>>,
-    unique_index: u32,
+    unique_indexes: Vec<u32>,
     tun_ip_addresses: Vec<String>,
 }
 
@@ -650,7 +650,7 @@ impl Streamer {
                 destination_address,
                 destination_port,
                 relays: Vec::new(),
-                unique_index: 0,
+                unique_indexes: (0..255).collect(),
                 tun_ip_addresses,
             })
         }))
@@ -714,12 +714,15 @@ impl Streamer {
                 let Some(tun_ip_address) = self.tun_ip_addresses.pop() else {
                     return;
                 };
+                let Some(unique_index) = self.unique_indexes.pop() else {
+                    return;
+                };
                 let relay = Relay::new(
                     self.me.clone(),
                     relay_address,
                     writer,
                     tun_ip_address,
-                    self.get_unique_index(),
+                    unique_index,
                 );
                 relay.lock().await.start(reader);
                 self.add_relay(relay);
@@ -730,12 +733,6 @@ impl Streamer {
         }
     }
 
-    fn get_unique_index(&mut self) -> u32 {
-        self.unique_index += 1;
-        self.unique_index %= 4800;
-        self.unique_index
-    }
-
     fn add_relay(&mut self, relay: Arc<Mutex<Relay>>) {
         self.relays.push(relay);
         self.log_number_of_relays();
@@ -743,7 +740,9 @@ impl Streamer {
 
     async fn remove_relay(&mut self, relay: &Arc<Mutex<Relay>>) {
         let tun_ip_address = relay.lock().await.tun_ip_address.clone();
+        let unique_index = relay.lock().await.unique_index;
         self.tun_ip_addresses.insert(0, tun_ip_address);
+        self.unique_indexes.insert(0, unique_index);
         self.relays.retain(|r| !Arc::ptr_eq(r, relay));
         self.log_number_of_relays();
     }
