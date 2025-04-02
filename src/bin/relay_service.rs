@@ -41,7 +41,7 @@ async fn main() {
         args.network_interfaces_to_allow,
         args.network_interfaces_to_ignore,
     );
-    relay_service.lock().await.start().await;
+    relay_service.start().await;
 
     loop {
         tokio::time::sleep(Duration::from_secs(3600)).await;

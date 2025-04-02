@@ -27,7 +27,7 @@ pub struct Status {
 pub type GetStatusClosure =
     Box<dyn Fn() -> Pin<Box<dyn Future<Output = Status> + Send + Sync>> + Send + Sync>;
 
-pub struct Relay {
+struct RelayInner {
     me: Weak<Mutex<Self>>,
     /// Store a local IP address  for binding UDP sockets
     bind_address: String,
@@ -45,8 +45,8 @@ pub struct Relay {
     start_on_reconnect_soon: Arc<Mutex<bool>>,
 }
 
-impl Relay {
-    pub fn new() -> Arc<Mutex<Self>> {
+impl RelayInner {
+    fn new() -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
                 me: me.clone(),
@@ -67,11 +67,11 @@ impl Relay {
         })
     }
 
-    pub fn set_bind_address(&mut self, address: String) {
+    fn set_bind_address(&mut self, address: String) {
         self.bind_address = address;
     }
 
-    pub async fn setup<F>(
+    async fn setup<F>(
         &mut self,
         streamer_url: String,
         password: String,
@@ -91,18 +91,18 @@ impl Relay {
         info!("Binding to address: {:?}", self.bind_address);
     }
 
-    pub fn is_started(&self) -> bool {
+    fn is_started(&self) -> bool {
         self.started
     }
 
-    pub async fn start(&mut self) {
+    async fn start(&mut self) {
         if !self.started {
             self.started = true;
             self.start_internal().await;
         }
     }
 
-    pub async fn stop(&mut self) {
+    async fn stop(&mut self) {
         if self.started {
             self.started = false;
             self.stop_internal().await;
@@ -461,6 +461,65 @@ impl Relay {
         };
         writer.send(message).await?;
         Ok(())
+    }
+}
+
+pub struct Relay {
+    inner: Arc<Mutex<RelayInner>>,
+}
+
+impl Default for Relay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Relay {
+    pub fn new() -> Self {
+        Self {
+            inner: RelayInner::new(),
+        }
+    }
+
+    pub async fn set_bind_address(&self, address: String) {
+        self.inner.lock().await.set_bind_address(address);
+    }
+
+    pub async fn setup<F>(
+        &self,
+        streamer_url: String,
+        password: String,
+        relay_id: Uuid,
+        name: String,
+        on_status_updated: F,
+        get_status: Option<GetStatusClosure>,
+    ) where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        self.inner
+            .lock()
+            .await
+            .setup(
+                streamer_url,
+                password,
+                relay_id,
+                name,
+                on_status_updated,
+                get_status,
+            )
+            .await;
+    }
+
+    pub async fn is_started(&self) -> bool {
+        self.inner.lock().await.is_started()
+    }
+
+    pub async fn start(&self) {
+        self.inner.lock().await.start().await;
+    }
+
+    pub async fn stop(&self) {
+        self.inner.lock().await.stop().await;
     }
 }
 

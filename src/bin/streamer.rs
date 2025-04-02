@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         args.destination_address,
         args.destination_port,
     )?;
-    streamer.lock().await.start().await?;
+    streamer.start().await?;
 
     loop {
         tokio::time::sleep(Duration::from_secs(3600)).await;

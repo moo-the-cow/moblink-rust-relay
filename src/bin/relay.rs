@@ -119,12 +119,10 @@ async fn run_manual(args: Args, relay_id: Uuid, streamer_url: String) {
     let relay = relay::Relay::new();
 
     if !args.bind_address.is_empty() {
-        relay.lock().await.set_bind_address(args.bind_address);
+        relay.set_bind_address(args.bind_address).await;
     }
 
     relay
-        .lock()
-        .await
         .setup(
             streamer_url,
             args.password,
@@ -134,7 +132,7 @@ async fn run_manual(args: Args, relay_id: Uuid, streamer_url: String) {
             create_get_status_closure(&args.status_executable, &args.status_file),
         )
         .await;
-    relay.lock().await.start().await;
+    relay.start().await;
 
     loop {
         tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -142,82 +140,72 @@ async fn run_manual(args: Args, relay_id: Uuid, streamer_url: String) {
 }
 
 async fn run_automatic(args: Args, relay_id: Uuid) {
-    let mdns_task = tokio::spawn(async move {
-        let mut retries = 0;
+    let mut retries = 0;
 
-        loop {
-            let mdns = ServiceDaemon::new().expect("Failed to create mDNS daemon");
-            let receiver = mdns
-                .browse(MDNS_SERVICE_TYPE)
-                .expect("Failed to browse services");
+    loop {
+        let mdns = ServiceDaemon::new().expect("Failed to create mDNS daemon");
+        let receiver = mdns
+            .browse(MDNS_SERVICE_TYPE)
+            .expect("Failed to browse services");
 
-            info!("Searching for Moblink streamers via mDNS...");
-            let relay = relay::Relay::new();
+        info!("Searching for Moblink streamers via mDNS...");
+        let relay = relay::Relay::new();
 
-            while let Ok(event) = receiver.recv_async().await {
-                let mut relay = relay.lock().await;
-                match event {
-                    ServiceEvent::ServiceResolved(info) => {
-                        if relay.is_started() {
-                            warn!("Relay already started, skipping discovery");
+        while let Ok(event) = receiver.recv_async().await {
+            match event {
+                ServiceEvent::ServiceResolved(info) => {
+                    if relay.is_started().await {
+                        warn!("Relay already started, skipping discovery");
+                        continue;
+                    }
+                    // Handle network interface binding
+                    if !args.bind_address.is_empty() {
+                        relay.set_bind_address(args.bind_address.clone()).await;
+                    }
+
+                    let port = info.get_port();
+                    for ip in info.get_addresses() {
+                        if ip.is_loopback() || ip.is_multicast() {
                             continue;
                         }
-                        // Handle network interface binding
-                        if !args.bind_address.is_empty() {
-                            relay.set_bind_address(args.bind_address.clone());
+
+                        // Skip IPv6 for now
+                        if ip.is_ipv6() {
+                            continue;
                         }
 
-                        let port = info.get_port();
-                        for ip in info.get_addresses() {
-                            if ip.is_loopback() || ip.is_multicast() {
-                                continue;
-                            }
+                        let streamer_url = format!("ws://{}:{}", ip, port);
+                        info!("Discovered Moblink streamer at {}", streamer_url);
 
-                            // Skip IPv6 for now
-                            if ip.is_ipv6() {
-                                continue;
-                            }
-
-                            let streamer_url = format!("ws://{}:{}", ip, port);
-                            info!("Discovered Moblink streamer at {}", streamer_url);
-
-                            relay
-                                .setup(
-                                    streamer_url,
-                                    args.password.clone(),
-                                    relay_id,
-                                    args.name.clone(),
-                                    |status| info!("Status: {}", status),
-                                    create_get_status_closure(
-                                        &args.status_executable,
-                                        &args.status_file,
-                                    ),
-                                )
-                                .await;
-                        }
-
-                        relay.start().await;
+                        relay
+                            .setup(
+                                streamer_url,
+                                args.password.clone(),
+                                relay_id,
+                                args.name.clone(),
+                                |status| info!("Status: {}", status),
+                                create_get_status_closure(
+                                    &args.status_executable,
+                                    &args.status_file,
+                                ),
+                            )
+                            .await;
                     }
-                    ServiceEvent::ServiceRemoved(_, _) => {
-                        warn!("Streamer service removed");
-                        relay.stop().await;
-                    }
-                    _ => {}
+
+                    relay.start().await;
                 }
+                ServiceEvent::ServiceRemoved(_, _) => {
+                    warn!("Streamer service removed");
+                    relay.stop().await;
+                }
+                _ => {}
             }
-
-            // Reconnect logic with backoff
-            let delay = Duration::from_secs(2u64.pow(retries));
-            warn!("No streamers found, retrying in {:?}...", delay);
-            tokio::time::sleep(delay).await;
-            retries = (retries + 1).min(5);
         }
-    });
 
-    match mdns_task.await {
-        Err(e) => {
-            warn!("mDNS task failed: {:?}", e);
-        }
-        _ => {}
+        // Reconnect logic with backoff
+        let delay = Duration::from_secs(2u64.pow(retries));
+        warn!("No streamers found, retrying in {:?}...", delay);
+        tokio::time::sleep(delay).await;
+        retries = (retries + 1).min(5);
     }
 }

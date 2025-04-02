@@ -15,7 +15,7 @@ struct ServiceRelay {
     interface_address: Ipv4Addr,
     streamer_name: String,
     streamer_url: String,
-    relay: Arc<Mutex<Relay>>,
+    relay: Relay,
 }
 
 impl ServiceRelay {
@@ -28,8 +28,6 @@ impl ServiceRelay {
     ) -> Self {
         let relay = Relay::new();
         relay
-            .lock()
-            .await
             .setup(
                 streamer_url.clone(),
                 password,
@@ -39,7 +37,7 @@ impl ServiceRelay {
                 None,
             )
             .await;
-        relay.lock().await.start().await;
+        relay.start().await;
         Self {
             interface_name,
             interface_address,
@@ -55,7 +53,7 @@ struct Streamer {
     url: String,
 }
 
-pub struct RelayService {
+struct RelayServiceInner {
     me: Weak<Mutex<Self>>,
     password: String,
     network_interfaces_to_allow: Vec<String>,
@@ -67,8 +65,8 @@ pub struct RelayService {
     streamers_monitor: Option<JoinHandle<()>>,
 }
 
-impl RelayService {
-    pub fn new(
+impl RelayServiceInner {
+    fn new(
         password: String,
         network_interfaces_to_allow: Vec<String>,
         network_interfaces_to_ignore: Vec<String>,
@@ -88,12 +86,12 @@ impl RelayService {
         })
     }
 
-    pub async fn start(&mut self) {
+    async fn start(&mut self) {
         self.start_network_interfaces_monitor();
         self.start_streamers_monitor();
     }
 
-    pub async fn stop(&mut self) {
+    async fn stop(&mut self) {
         if let Some(network_interface_monitor) = self.network_interface_monitor.take() {
             network_interface_monitor.abort();
             network_interface_monitor.await.ok();
@@ -104,7 +102,7 @@ impl RelayService {
         }
     }
 
-    pub fn start_network_interfaces_monitor(&mut self) {
+    fn start_network_interfaces_monitor(&mut self) {
         let relay_service = self.me.clone();
         self.network_interface_monitor = Some(tokio::spawn(async move {
             loop {
@@ -133,7 +131,7 @@ impl RelayService {
         self.network_interfaces = interfaces;
     }
 
-    pub fn start_streamers_monitor(&mut self) {
+    fn start_streamers_monitor(&mut self) {
         let relay_service = self.me.clone();
         self.streamers_monitor = Some(tokio::spawn(async move {
             loop {
@@ -196,10 +194,7 @@ impl RelayService {
                 continue;
             }
             for streamer in &self.streamers {
-                if self.relays.iter().any(|relay| {
-                    relay.interface_address == interface_address
-                        && relay.streamer_url == streamer.url
-                }) {
+                if self.relay_already_added(interface_address, &streamer.url) {
                     continue;
                 }
                 info!(
@@ -221,15 +216,17 @@ impl RelayService {
         }
     }
 
+    fn relay_already_added(&self, interface_address: Ipv4Addr, streamer_url: &str) -> bool {
+        self.relays.iter().any(|relay| {
+            relay.interface_address == interface_address && relay.streamer_url == streamer_url
+        })
+    }
+
     async fn remove_relays(&mut self) {
         let mut relays_to_keep: Vec<ServiceRelay> = Vec::new();
         let mut relays_to_remove: Vec<ServiceRelay> = Vec::new();
         for relay in self.relays.drain(..) {
-            if self
-                .network_interfaces
-                .iter()
-                .any(|interface| get_first_ipv4_address(interface) == Some(relay.interface_address))
-            {
+            if Self::should_keep_relay(&self.network_interfaces, relay.interface_address) {
                 relays_to_keep.push(relay);
             } else {
                 relays_to_remove.push(relay);
@@ -245,8 +242,17 @@ impl RelayService {
                 relay.streamer_name,
                 relay.streamer_url
             );
-            relay.relay.lock().await.stop().await;
+            relay.relay.stop().await;
         }
+    }
+
+    fn should_keep_relay(
+        network_interfaces: &Vec<NetworkInterface>,
+        interface_address: Ipv4Addr,
+    ) -> bool {
+        network_interfaces
+            .iter()
+            .any(|interface| get_first_ipv4_address(interface) == Some(interface_address))
     }
 }
 
@@ -257,4 +263,32 @@ fn get_first_ipv4_address(interface: &NetworkInterface) -> Option<Ipv4Addr> {
         }
     }
     None
+}
+
+pub struct RelayService {
+    inner: Arc<Mutex<RelayServiceInner>>,
+}
+
+impl RelayService {
+    pub fn new(
+        password: String,
+        network_interfaces_to_allow: Vec<String>,
+        network_interfaces_to_ignore: Vec<String>,
+    ) -> Self {
+        Self {
+            inner: RelayServiceInner::new(
+                password,
+                network_interfaces_to_allow,
+                network_interfaces_to_ignore,
+            ),
+        }
+    }
+
+    pub async fn start(&self) {
+        self.inner.lock().await.start().await;
+    }
+
+    pub async fn stop(&self) {
+        self.inner.lock().await.stop().await;
+    }
 }
