@@ -64,10 +64,10 @@ fn setup_logging(log_level: &str) {
 fn create_get_status_closure(
     status_executable: &Option<String>,
     status_file: &Option<String>,
-) -> GetStatusClosure {
+) -> Option<GetStatusClosure> {
     let status_executable = status_executable.clone();
     let status_file = status_file.clone();
-    Box::new(move || {
+    Some(Box::new(move || {
         let status_executable = status_executable.clone();
         let status_file = status_file.clone();
         Box::pin(async move {
@@ -97,7 +97,7 @@ fn create_get_status_closure(
                 }
             }
         })
-    })
+    }))
 }
 
 #[tokio::main]
