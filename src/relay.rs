@@ -78,12 +78,12 @@ impl Relay {
         relay_id: Uuid,
         name: String,
         on_status_updated: F,
-        get_status: GetStatusClosure,
+        get_status: Option<GetStatusClosure>,
     ) where
         F: Fn(String) + Send + Sync + 'static,
     {
         self.on_status_updated = Some(Box::new(on_status_updated));
-        self.get_status = Some(Arc::new(get_status));
+        self.get_status = get_status.map(Arc::new);
         self.relay_id = relay_id;
         self.streamer_url = streamer_url;
         self.password = password;
@@ -441,14 +441,11 @@ impl Relay {
         &mut self,
         request: MessageRequest,
     ) -> Result<(), AnyError> {
-        let Some(get_status) = self.get_status.as_ref() else {
-            error!("get_battery_percentage is not set");
-            return Err("get_battery_percentage function not set".into());
-        };
-        let status = get_status().await;
-        let data = ResponseData::Status(StatusResponseData {
-            battery_percentage: status.battery_percentage,
-        });
+        let mut battery_percentage = None;
+        if let Some(get_status) = self.get_status.as_ref() {
+            battery_percentage = get_status().await.battery_percentage;
+        }
+        let data = ResponseData::Status(StatusResponseData { battery_percentage });
         let response = request.to_ok_response(data);
         self.send(MessageToStreamer::Response(response)).await
     }
