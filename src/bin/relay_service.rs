@@ -10,6 +10,10 @@ struct Args {
     #[arg(long, default_value = "1234")]
     password: String,
 
+    /// Network interfaces to allow. Localhost is never allowed.
+    #[arg(long)]
+    network_interfaces_to_allow: Vec<String>,
+
     /// Network interfaces to ignore. Ignores localhost automatically.
     #[arg(long)]
     network_interfaces_to_ignore: Vec<String>,
@@ -32,7 +36,11 @@ async fn main() {
     let args = Args::parse();
     setup_logging(&args.log_level);
 
-    let relay_service = RelayService::new(args.password, args.network_interfaces_to_ignore);
+    let relay_service = RelayService::new(
+        args.password,
+        args.network_interfaces_to_allow,
+        args.network_interfaces_to_ignore,
+    );
     relay_service.lock().await.start().await;
 
     loop {

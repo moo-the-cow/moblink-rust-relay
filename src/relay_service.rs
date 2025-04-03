@@ -58,6 +58,7 @@ struct Streamer {
 pub struct RelayService {
     me: Weak<Mutex<Self>>,
     password: String,
+    network_interfaces_to_allow: Vec<String>,
     network_interfaces_to_ignore: Vec<String>,
     relays: Vec<ServiceRelay>,
     network_interfaces: Vec<NetworkInterface>,
@@ -67,11 +68,16 @@ pub struct RelayService {
 }
 
 impl RelayService {
-    pub fn new(password: String, network_interfaces_to_ignore: Vec<String>) -> Arc<Mutex<Self>> {
+    pub fn new(
+        password: String,
+        network_interfaces_to_allow: Vec<String>,
+        network_interfaces_to_ignore: Vec<String>,
+    ) -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
                 me: me.clone(),
                 password,
+                network_interfaces_to_allow,
                 network_interfaces_to_ignore,
                 relays: Vec::new(),
                 network_interfaces: Vec::new(),
@@ -102,7 +108,7 @@ impl RelayService {
         let relay_service = self.me.clone();
         self.network_interface_monitor = Some(tokio::spawn(async move {
             loop {
-                let Ok(mut interfaces) = NetworkInterface::show() else {
+                let Ok(interfaces) = NetworkInterface::show() else {
                     break;
                 };
                 let Some(relay_service) = relay_service.upgrade() else {
@@ -110,17 +116,21 @@ impl RelayService {
                 };
                 {
                     let mut relay_service = relay_service.lock().await;
-                    interfaces.retain(|interface| {
-                        !relay_service
-                            .network_interfaces_to_ignore
-                            .contains(&interface.name)
-                    });
-                    relay_service.network_interfaces = interfaces;
+                    relay_service.update_network_interfaces(interfaces);
                     relay_service.updated().await;
                 }
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
         }));
+    }
+
+    fn update_network_interfaces(&mut self, mut interfaces: Vec<NetworkInterface>) {
+        if !self.network_interfaces_to_allow.is_empty() {
+            interfaces
+                .retain(|interface| self.network_interfaces_to_allow.contains(&interface.name));
+        }
+        interfaces.retain(|interface| !self.network_interfaces_to_ignore.contains(&interface.name));
+        self.network_interfaces = interfaces;
     }
 
     pub fn start_streamers_monitor(&mut self) {
