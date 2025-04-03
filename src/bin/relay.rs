@@ -2,13 +2,10 @@ use std::time::Duration;
 
 use clap::Parser;
 use gethostname::gethostname;
-use log::{error, info, warn};
+use log::{info, warn};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
-use moblink_rust::{MDNS_SERVICE_TYPE, relay};
-use relay::GetStatusClosure;
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use moblink_rust::MDNS_SERVICE_TYPE;
+use moblink_rust::relay::{self, create_get_status_closure};
 use uuid::Uuid;
 
 fn hostname() -> String {
@@ -59,45 +56,6 @@ fn setup_logging(log_level: &str) {
         .format_timestamp_millis()
         .parse_filters(log_level)
         .init();
-}
-
-fn create_get_status_closure(
-    status_executable: &Option<String>,
-    status_file: &Option<String>,
-) -> Option<GetStatusClosure> {
-    let status_executable = status_executable.clone();
-    let status_file = status_file.clone();
-    Some(Box::new(move || {
-        let status_executable = status_executable.clone();
-        let status_file = status_file.clone();
-        Box::pin(async move {
-            let output = if let Some(status_executable) = &status_executable {
-                let Ok(output) = Command::new(status_executable).output().await else {
-                    return Default::default();
-                };
-                output.stdout
-            } else if let Some(status_file) = &status_file {
-                let Ok(mut file) = File::open(status_file).await else {
-                    return Default::default();
-                };
-                let mut contents = vec![];
-                if file.read_to_end(&mut contents).await.is_err() {
-                    return Default::default();
-                }
-                contents
-            } else {
-                return Default::default();
-            };
-            let output = String::from_utf8(output).unwrap_or_default();
-            match serde_json::from_str(&output) {
-                Ok(status) => status,
-                Err(e) => {
-                    error!("Failed to decode status with error: {e}");
-                    Default::default()
-                }
-            }
-        })
-    }))
 }
 
 #[tokio::main]

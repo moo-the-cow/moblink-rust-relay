@@ -8,7 +8,10 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info};
 use serde::Deserialize;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep, timeout};
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -18,7 +21,7 @@ use uuid::Uuid;
 use crate::protocol::*;
 use crate::utils::AnyError;
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     pub battery_percentage: Option<i32>,
@@ -701,4 +704,43 @@ fn parse_socket_addr(addr_str: &str) -> Result<SocketAddr, std::io::Error> {
         std::io::ErrorKind::InvalidInput,
         "Invalid socket address syntax. Expected 'IP:port' or 'IP'.",
     ))
+}
+
+pub fn create_get_status_closure(
+    status_executable: &Option<String>,
+    status_file: &Option<String>,
+) -> Option<GetStatusClosure> {
+    let status_executable = status_executable.clone();
+    let status_file = status_file.clone();
+    Some(Box::new(move || {
+        let status_executable = status_executable.clone();
+        let status_file = status_file.clone();
+        Box::pin(async move {
+            let output = if let Some(status_executable) = &status_executable {
+                let Ok(output) = Command::new(status_executable).output().await else {
+                    return Default::default();
+                };
+                output.stdout
+            } else if let Some(status_file) = &status_file {
+                let Ok(mut file) = File::open(status_file).await else {
+                    return Default::default();
+                };
+                let mut contents = vec![];
+                if file.read_to_end(&mut contents).await.is_err() {
+                    return Default::default();
+                }
+                contents
+            } else {
+                return Default::default();
+            };
+            let output = String::from_utf8(output).unwrap_or_default();
+            match serde_json::from_str(&output) {
+                Ok(status) => status,
+                Err(e) => {
+                    error!("Failed to decode status with error: {e}");
+                    Default::default()
+                }
+            }
+        })
+    }))
 }

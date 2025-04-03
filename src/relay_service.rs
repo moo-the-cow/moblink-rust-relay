@@ -8,7 +8,8 @@ use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::{MDNS_SERVICE_TYPE, Relay};
+use crate::MDNS_SERVICE_TYPE;
+use crate::relay::{GetStatusClosure, Relay, Status};
 
 struct ServiceRelay {
     interface_name: String,
@@ -25,6 +26,7 @@ impl ServiceRelay {
         streamer_name: String,
         streamer_url: String,
         password: String,
+        get_status: Option<GetStatusClosure>,
     ) -> Self {
         let relay = Relay::new();
         relay
@@ -34,7 +36,7 @@ impl ServiceRelay {
                 uuid::Uuid::new_v4(),
                 interface_name.clone(),
                 |_| {},
-                None,
+                get_status,
             )
             .await;
         relay.start().await;
@@ -58,11 +60,14 @@ struct RelayServiceInner {
     password: String,
     network_interfaces_to_allow: Vec<String>,
     network_interfaces_to_ignore: Vec<String>,
+    get_status: Option<GetStatusClosure>,
+    status: Status,
     relays: Vec<ServiceRelay>,
     network_interfaces: Vec<NetworkInterface>,
     streamers: Vec<Streamer>,
     network_interface_monitor: Option<JoinHandle<()>>,
     streamers_monitor: Option<JoinHandle<()>>,
+    get_status_updater: Option<JoinHandle<()>>,
 }
 
 impl RelayServiceInner {
@@ -70,6 +75,7 @@ impl RelayServiceInner {
         password: String,
         network_interfaces_to_allow: Vec<String>,
         network_interfaces_to_ignore: Vec<String>,
+        get_status: Option<GetStatusClosure>,
     ) -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
@@ -77,11 +83,14 @@ impl RelayServiceInner {
                 password,
                 network_interfaces_to_allow,
                 network_interfaces_to_ignore,
+                get_status,
+                status: Default::default(),
                 relays: Vec::new(),
                 network_interfaces: Vec::new(),
                 streamers: Vec::new(),
                 network_interface_monitor: None,
                 streamers_monitor: None,
+                get_status_updater: None,
             })
         })
     }
@@ -89,6 +98,7 @@ impl RelayServiceInner {
     async fn start(&mut self) {
         self.start_network_interfaces_monitor();
         self.start_streamers_monitor();
+        self.start_get_status_updater();
     }
 
     async fn stop(&mut self) {
@@ -169,6 +179,27 @@ impl RelayServiceInner {
         }));
     }
 
+    fn start_get_status_updater(&mut self) {
+        let relay_service = self.me.clone();
+        self.get_status_updater = Some(tokio::spawn(async move {
+            loop {
+                let Some(relay_service) = relay_service.upgrade() else {
+                    break;
+                };
+                relay_service.lock().await.update_status().await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }));
+    }
+
+    async fn update_status(&mut self) {
+        self.status = if let Some(get_status) = &self.get_status {
+            get_status().await
+        } else {
+            Status::default()
+        }
+    }
+
     fn add_streamer(&mut self, name: String, address: Ipv4Addr, port: u16) {
         let url = format!("ws://{}:{}", address, port);
         self.streamers.retain(|streamer| streamer.url != url);
@@ -209,11 +240,26 @@ impl RelayServiceInner {
                         streamer.name.clone(),
                         streamer.url.clone(),
                         self.password.clone(),
+                        self.create_get_status_closure(),
                     )
                     .await,
                 );
             }
         }
+    }
+
+    pub fn create_get_status_closure(&self) -> Option<GetStatusClosure> {
+        let relay_service = self.me.clone();
+        Some(Box::new(move || {
+            let relay_service = relay_service.clone();
+            Box::pin(async move {
+                if let Some(relay_service) = relay_service.upgrade() {
+                    relay_service.lock().await.status.clone()
+                } else {
+                    Status::default()
+                }
+            })
+        }))
     }
 
     fn relay_already_added(&self, interface_address: Ipv4Addr, streamer_url: &str) -> bool {
@@ -247,7 +293,7 @@ impl RelayServiceInner {
     }
 
     fn should_keep_relay(
-        network_interfaces: &Vec<NetworkInterface>,
+        network_interfaces: &[NetworkInterface],
         interface_address: Ipv4Addr,
     ) -> bool {
         network_interfaces
@@ -274,12 +320,14 @@ impl RelayService {
         password: String,
         network_interfaces_to_allow: Vec<String>,
         network_interfaces_to_ignore: Vec<String>,
+        get_status: Option<GetStatusClosure>,
     ) -> Self {
         Self {
             inner: RelayServiceInner::new(
                 password,
                 network_interfaces_to_allow,
                 network_interfaces_to_ignore,
+                get_status,
             ),
         }
     }
