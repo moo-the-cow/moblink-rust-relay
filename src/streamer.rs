@@ -9,8 +9,9 @@ use futures_util::{SinkExt, StreamExt};
 use ipnetwork::Ipv4Network;
 use log::{debug, error, info};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
-use packet::{Builder as _, Packet as _, ip, udp};
+use packet::{Builder as _, Packet, ip, udp};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::select;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinHandle;
@@ -357,42 +358,51 @@ impl Relay {
         let destination_address = &streamer.lock().await.destination_address;
         let table = self.get_linux_networking_table();
         self.teardown_linux_networking().await;
-        execute_command("ip", &[
-            "route",
-            "add",
-            destination_address,
-            "dev",
-            &self.tun_device_name(),
-            "proto",
-            "kernel",
-            "scope",
-            "link",
-            "src",
-            &self.tun_ip_address,
-            "table",
-            &table,
-        ])
+        execute_command(
+            "ip",
+            &[
+                "route",
+                "add",
+                destination_address,
+                "dev",
+                &self.tun_device_name(),
+                "proto",
+                "kernel",
+                "scope",
+                "link",
+                "src",
+                &self.tun_ip_address,
+                "table",
+                &table,
+            ],
+        )
         .await;
-        execute_command("ip", &[
-            "route",
-            "add",
-            "default",
-            "via",
-            &self.tun_ip_address,
-            "dev",
-            &self.tun_device_name(),
-            "table",
-            &table,
-        ])
+        execute_command(
+            "ip",
+            &[
+                "route",
+                "add",
+                "default",
+                "via",
+                &self.tun_ip_address,
+                "dev",
+                &self.tun_device_name(),
+                "table",
+                &table,
+            ],
+        )
         .await;
-        execute_command("ip", &[
-            "rule",
-            "add",
-            "from",
-            &self.tun_ip_address,
-            "lookup",
-            &table,
-        ])
+        execute_command(
+            "ip",
+            &[
+                "rule",
+                "add",
+                "from",
+                &self.tun_ip_address,
+                "lookup",
+                &table,
+            ],
+        )
         .await;
     }
 
@@ -426,13 +436,14 @@ impl Relay {
             return;
         };
         self.tun_receiver = Some(tokio::spawn(async move {
-            let mut tun_port_writer = Some(tun_port_writer);
+            let mut tun_port = 0u16;
             while let Some(packet) = tun_reader.next().await {
                 if let Err(error) = Self::handle_tun_packet(
                     packet,
                     &relay_socket,
                     destination_address,
-                    &mut tun_port_writer,
+                    &tun_port_writer,
+                    &mut tun_port,
                 )
                 .await
                 {
@@ -447,7 +458,8 @@ impl Relay {
         packet: Result<Vec<u8>, std::io::Error>,
         relay_socket: &Arc<UdpSocket>,
         destination_address: Ipv4Addr,
-        tun_port_writer: &mut Option<Sender<u16>>,
+        tun_port_writer: &Sender<u16>,
+        tun_port: &mut u16,
     ) -> Result<(), AnyError> {
         match packet {
             Ok(packet) => match ip::Packet::new(packet) {
@@ -460,6 +472,7 @@ impl Relay {
                             packet.payload(),
                             relay_socket,
                             tun_port_writer,
+                            tun_port,
                         )
                         .await?;
                     }
@@ -481,13 +494,16 @@ impl Relay {
     async fn handle_tun_udp_packet(
         packet: &[u8],
         relay_socket: &Arc<UdpSocket>,
-        tun_port_writer: &mut Option<Sender<u16>>,
+        tun_port_writer: &Sender<u16>,
+        tun_port: &mut u16,
     ) -> Result<(), AnyError> {
         match udp::Packet::new(packet) {
             Ok(packet) => {
                 debug!("TUN receiver: Got UDP packet: {:?}", packet);
-                if let Some(tun_port_writer) = tun_port_writer.take() {
-                    tun_port_writer.send(packet.source()).await.ok();
+                let new_tun_port = packet.source();
+                if new_tun_port != *tun_port {
+                    tun_port_writer.send(new_tun_port).await.ok();
+                    *tun_port = new_tun_port;
                 }
                 if let Err(error) = relay_socket.send(packet.payload()).await {
                     return Err(format!("Send error {}", error).into());
@@ -521,38 +537,57 @@ impl Relay {
             let Ok(tun_ip_address) = Ipv4Addr::from_str(&tun_ip_address) else {
                 return;
             };
-            info!("Relay receiver: Waiting for TUN port");
-            let Some(tun_port) = tun_port_reader.recv().await else {
-                return;
-            };
-            let packet_builder = PacketBuilder::new(
-                destination_address,
-                destination_port,
-                tun_ip_address,
-                tun_port,
-            );
-            info!("Relay receiver: Ready with {:?}", packet_builder);
             let mut buffer = vec![0; 2048];
+            let mut packet_builder =
+                PacketBuilder::new(destination_address, destination_port, tun_ip_address, 10000);
             loop {
-                match relay_socket.recv(&mut buffer).await {
-                    Ok(length) => {
-                        debug!("Relay receiver: Got {:?}", &buffer[..length]);
-                        let Ok(packet) = packet_builder.pack(&buffer[..length]) else {
-                            error!("Relay receiver: IP create error");
-                            break;
-                        };
-                        if let Err(error) = tun_writer.send(packet).await {
-                            error!("Relay receiver: Send error {}", error);
-                            break;
-                        }
+                if let Err(error) = select! {
+                    result = relay_socket.recv(&mut buffer) => {
+                        Self::handle_relay_packet(&mut tun_writer, &packet_builder, result, &buffer).await
                     }
-                    Err(error) => {
-                        error!("Relay receiver: Error {}", error);
-                        break;
+                    tun_port = tun_port_reader.recv() => {
+                        Self::handle_tun_port(&mut packet_builder, tun_port)
                     }
+                } {
+                    error!("Relay receiver: Error {}", error);
+                    break;
                 }
             }
         }));
+        Ok(())
+    }
+
+    async fn handle_relay_packet(
+        tun_writer: &mut TunWriter,
+        packet_builder: &PacketBuilder,
+        result: Result<usize, std::io::Error>,
+        buffer: &[u8],
+    ) -> Result<(), AnyError> {
+        match result {
+            Ok(length) => {
+                debug!("Relay receiver: Got {:?}", &buffer[..length]);
+                let Ok(packet) = packet_builder.pack(&buffer[..length]) else {
+                    return Err("Relay receiver: IP create error".into());
+                };
+                if let Err(error) = tun_writer.send(packet).await {
+                    Err(format!("Relay receiver: Send error {}", error).into())
+                } else {
+                    Ok(())
+                }
+            }
+            Err(error) => Err(format!("Relay receiver: Error {}", error).into()),
+        }
+    }
+
+    fn handle_tun_port(
+        packet_builder: &mut PacketBuilder,
+        tun_port: Option<u16>,
+    ) -> Result<(), AnyError> {
+        let Some(tun_port) = tun_port else {
+            return Err("TUN port missing".into());
+        };
+        packet_builder.destination_port = tun_port;
+        info!("Relay receiver: Ready with {:?}", packet_builder);
         Ok(())
     }
 
