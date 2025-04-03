@@ -8,7 +8,10 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info};
 use serde::Deserialize;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep, timeout};
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -18,7 +21,7 @@ use uuid::Uuid;
 use crate::protocol::*;
 use crate::utils::AnyError;
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     pub battery_percentage: Option<i32>,
@@ -27,7 +30,7 @@ pub struct Status {
 pub type GetStatusClosure =
     Box<dyn Fn() -> Pin<Box<dyn Future<Output = Status> + Send + Sync>> + Send + Sync>;
 
-pub struct Relay {
+struct RelayInner {
     me: Weak<Mutex<Self>>,
     /// Store a local IP address  for binding UDP sockets
     bind_address: String,
@@ -45,8 +48,8 @@ pub struct Relay {
     start_on_reconnect_soon: Arc<Mutex<bool>>,
 }
 
-impl Relay {
-    pub fn new() -> Arc<Mutex<Self>> {
+impl RelayInner {
+    fn new() -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
                 me: me.clone(),
@@ -67,11 +70,11 @@ impl Relay {
         })
     }
 
-    pub fn set_bind_address(&mut self, address: String) {
+    fn set_bind_address(&mut self, address: String) {
         self.bind_address = address;
     }
 
-    pub async fn setup<F>(
+    async fn setup<F>(
         &mut self,
         streamer_url: String,
         password: String,
@@ -91,18 +94,18 @@ impl Relay {
         info!("Binding to address: {:?}", self.bind_address);
     }
 
-    pub fn is_started(&self) -> bool {
+    fn is_started(&self) -> bool {
         self.started
     }
 
-    pub async fn start(&mut self) {
+    async fn start(&mut self) {
         if !self.started {
             self.started = true;
             self.start_internal().await;
         }
     }
 
-    pub async fn stop(&mut self) {
+    async fn stop(&mut self) {
         if self.started {
             self.started = false;
             self.stop_internal().await;
@@ -464,6 +467,65 @@ impl Relay {
     }
 }
 
+pub struct Relay {
+    inner: Arc<Mutex<RelayInner>>,
+}
+
+impl Default for Relay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Relay {
+    pub fn new() -> Self {
+        Self {
+            inner: RelayInner::new(),
+        }
+    }
+
+    pub async fn set_bind_address(&self, address: String) {
+        self.inner.lock().await.set_bind_address(address);
+    }
+
+    pub async fn setup<F>(
+        &self,
+        streamer_url: String,
+        password: String,
+        relay_id: Uuid,
+        name: String,
+        on_status_updated: F,
+        get_status: Option<GetStatusClosure>,
+    ) where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        self.inner
+            .lock()
+            .await
+            .setup(
+                streamer_url,
+                password,
+                relay_id,
+                name,
+                on_status_updated,
+                get_status,
+            )
+            .await;
+    }
+
+    pub async fn is_started(&self) -> bool {
+        self.inner.lock().await.is_started()
+    }
+
+    pub async fn start(&self) {
+        self.inner.lock().await.start().await;
+    }
+
+    pub async fn stop(&self) {
+        self.inner.lock().await.stop().await;
+    }
+}
+
 fn start_relay_from_streamer_to_destination(
     streamer_socket: Arc<UdpSocket>,
     destination_socket: Arc<UdpSocket>,
@@ -642,4 +704,43 @@ fn parse_socket_addr(addr_str: &str) -> Result<SocketAddr, std::io::Error> {
         std::io::ErrorKind::InvalidInput,
         "Invalid socket address syntax. Expected 'IP:port' or 'IP'.",
     ))
+}
+
+pub fn create_get_status_closure(
+    status_executable: &Option<String>,
+    status_file: &Option<String>,
+) -> Option<GetStatusClosure> {
+    let status_executable = status_executable.clone();
+    let status_file = status_file.clone();
+    Some(Box::new(move || {
+        let status_executable = status_executable.clone();
+        let status_file = status_file.clone();
+        Box::pin(async move {
+            let output = if let Some(status_executable) = &status_executable {
+                let Ok(output) = Command::new(status_executable).output().await else {
+                    return Default::default();
+                };
+                output.stdout
+            } else if let Some(status_file) = &status_file {
+                let Ok(mut file) = File::open(status_file).await else {
+                    return Default::default();
+                };
+                let mut contents = vec![];
+                if file.read_to_end(&mut contents).await.is_err() {
+                    return Default::default();
+                }
+                contents
+            } else {
+                return Default::default();
+            };
+            let output = String::from_utf8(output).unwrap_or_default();
+            match serde_json::from_str(&output) {
+                Ok(status) => status,
+                Err(e) => {
+                    error!("Failed to decode status with error: {e}");
+                    Default::default()
+                }
+            }
+        })
+    }))
 }

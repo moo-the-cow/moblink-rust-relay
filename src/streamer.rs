@@ -72,7 +72,7 @@ impl PacketBuilder {
 
 struct Relay {
     me: Weak<Mutex<Self>>,
-    streamer: Weak<Mutex<Streamer>>,
+    streamer: Weak<Mutex<StreamerInner>>,
     relay_address: SocketAddr,
     writer: Option<WebSocketWriter>,
     challenge: String,
@@ -90,7 +90,7 @@ struct Relay {
 
 impl Relay {
     pub fn new(
-        streamer: Weak<Mutex<Streamer>>,
+        streamer: Weak<Mutex<StreamerInner>>,
         relay_address: SocketAddr,
         writer: WebSocketWriter,
         tun_ip_address: String,
@@ -608,7 +608,7 @@ impl Relay {
     }
 }
 
-pub struct Streamer {
+struct StreamerInner {
     me: Weak<Mutex<Self>>,
     id: String,
     name: String,
@@ -622,7 +622,7 @@ pub struct Streamer {
     tun_ip_network: Ipv4Network,
 }
 
-impl Streamer {
+impl StreamerInner {
     pub fn new(
         id: String,
         name: String,
@@ -746,6 +746,40 @@ impl Streamer {
 
     fn log_number_of_relays(&self) {
         info!("Number of relays: {}", self.relays.len())
+    }
+}
+
+pub struct Streamer {
+    inner: Arc<Mutex<StreamerInner>>,
+}
+
+impl Streamer {
+    pub fn new(
+        id: String,
+        name: String,
+        address: String,
+        port: u16,
+        tun_ip_network: String,
+        password: String,
+        destination_address: String,
+        destination_port: u16,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self {
+            inner: StreamerInner::new(
+                id,
+                name,
+                address,
+                port,
+                tun_ip_network,
+                password,
+                destination_address,
+                destination_port,
+            )?,
+        })
+    }
+
+    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.lock().await.start().await
     }
 }
 

@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use clap::Parser;
-use moblink_rust::RelayService;
+use moblink_rust::relay::create_get_status_closure;
+use moblink_rust::relay_service::RelayService;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -21,6 +22,16 @@ struct Args {
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Status executable.
+    /// Print status to standard output on format {"batteryPercentage": 93}.
+    #[arg(long)]
+    status_executable: Option<String>,
+
+    /// Status file.
+    /// Contains status on format {"batteryPercentage": 93}.
+    #[arg(long)]
+    status_file: Option<String>,
 }
 
 fn setup_logging(log_level: &str) {
@@ -40,8 +51,9 @@ async fn main() {
         args.password,
         args.network_interfaces_to_allow,
         args.network_interfaces_to_ignore,
+        create_get_status_closure(&args.status_executable, &args.status_file),
     );
-    relay_service.lock().await.start().await;
+    relay_service.start().await;
 
     loop {
         tokio::time::sleep(Duration::from_secs(3600)).await;

@@ -8,14 +8,15 @@ use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::{MDNS_SERVICE_TYPE, Relay};
+use crate::MDNS_SERVICE_TYPE;
+use crate::relay::{GetStatusClosure, Relay, Status};
 
 struct ServiceRelay {
     interface_name: String,
     interface_address: Ipv4Addr,
     streamer_name: String,
     streamer_url: String,
-    relay: Arc<Mutex<Relay>>,
+    relay: Relay,
 }
 
 impl ServiceRelay {
@@ -25,21 +26,20 @@ impl ServiceRelay {
         streamer_name: String,
         streamer_url: String,
         password: String,
+        get_status: Option<GetStatusClosure>,
     ) -> Self {
         let relay = Relay::new();
         relay
-            .lock()
-            .await
             .setup(
                 streamer_url.clone(),
                 password,
                 uuid::Uuid::new_v4(),
                 interface_name.clone(),
                 |_| {},
-                None,
+                get_status,
             )
             .await;
-        relay.lock().await.start().await;
+        relay.start().await;
         Self {
             interface_name,
             interface_address,
@@ -55,23 +55,27 @@ struct Streamer {
     url: String,
 }
 
-pub struct RelayService {
+struct RelayServiceInner {
     me: Weak<Mutex<Self>>,
     password: String,
     network_interfaces_to_allow: Vec<String>,
     network_interfaces_to_ignore: Vec<String>,
+    get_status: Option<GetStatusClosure>,
+    status: Status,
     relays: Vec<ServiceRelay>,
     network_interfaces: Vec<NetworkInterface>,
     streamers: Vec<Streamer>,
     network_interface_monitor: Option<JoinHandle<()>>,
     streamers_monitor: Option<JoinHandle<()>>,
+    get_status_updater: Option<JoinHandle<()>>,
 }
 
-impl RelayService {
-    pub fn new(
+impl RelayServiceInner {
+    fn new(
         password: String,
         network_interfaces_to_allow: Vec<String>,
         network_interfaces_to_ignore: Vec<String>,
+        get_status: Option<GetStatusClosure>,
     ) -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
@@ -79,21 +83,25 @@ impl RelayService {
                 password,
                 network_interfaces_to_allow,
                 network_interfaces_to_ignore,
+                get_status,
+                status: Default::default(),
                 relays: Vec::new(),
                 network_interfaces: Vec::new(),
                 streamers: Vec::new(),
                 network_interface_monitor: None,
                 streamers_monitor: None,
+                get_status_updater: None,
             })
         })
     }
 
-    pub async fn start(&mut self) {
+    async fn start(&mut self) {
         self.start_network_interfaces_monitor();
         self.start_streamers_monitor();
+        self.start_get_status_updater();
     }
 
-    pub async fn stop(&mut self) {
+    async fn stop(&mut self) {
         if let Some(network_interface_monitor) = self.network_interface_monitor.take() {
             network_interface_monitor.abort();
             network_interface_monitor.await.ok();
@@ -104,7 +112,7 @@ impl RelayService {
         }
     }
 
-    pub fn start_network_interfaces_monitor(&mut self) {
+    fn start_network_interfaces_monitor(&mut self) {
         let relay_service = self.me.clone();
         self.network_interface_monitor = Some(tokio::spawn(async move {
             loop {
@@ -133,7 +141,7 @@ impl RelayService {
         self.network_interfaces = interfaces;
     }
 
-    pub fn start_streamers_monitor(&mut self) {
+    fn start_streamers_monitor(&mut self) {
         let relay_service = self.me.clone();
         self.streamers_monitor = Some(tokio::spawn(async move {
             loop {
@@ -171,6 +179,27 @@ impl RelayService {
         }));
     }
 
+    fn start_get_status_updater(&mut self) {
+        let relay_service = self.me.clone();
+        self.get_status_updater = Some(tokio::spawn(async move {
+            loop {
+                let Some(relay_service) = relay_service.upgrade() else {
+                    break;
+                };
+                relay_service.lock().await.update_status().await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }));
+    }
+
+    async fn update_status(&mut self) {
+        self.status = if let Some(get_status) = &self.get_status {
+            get_status().await
+        } else {
+            Status::default()
+        }
+    }
+
     fn add_streamer(&mut self, name: String, address: Ipv4Addr, port: u16) {
         let url = format!("ws://{}:{}", address, port);
         self.streamers.retain(|streamer| streamer.url != url);
@@ -196,10 +225,7 @@ impl RelayService {
                 continue;
             }
             for streamer in &self.streamers {
-                if self.relays.iter().any(|relay| {
-                    relay.interface_address == interface_address
-                        && relay.streamer_url == streamer.url
-                }) {
+                if self.relay_already_added(interface_address, &streamer.url) {
                     continue;
                 }
                 info!(
@@ -214,6 +240,7 @@ impl RelayService {
                         streamer.name.clone(),
                         streamer.url.clone(),
                         self.password.clone(),
+                        self.create_get_status_closure(),
                     )
                     .await,
                 );
@@ -221,15 +248,31 @@ impl RelayService {
         }
     }
 
+    pub fn create_get_status_closure(&self) -> Option<GetStatusClosure> {
+        let relay_service = self.me.clone();
+        Some(Box::new(move || {
+            let relay_service = relay_service.clone();
+            Box::pin(async move {
+                if let Some(relay_service) = relay_service.upgrade() {
+                    relay_service.lock().await.status.clone()
+                } else {
+                    Status::default()
+                }
+            })
+        }))
+    }
+
+    fn relay_already_added(&self, interface_address: Ipv4Addr, streamer_url: &str) -> bool {
+        self.relays.iter().any(|relay| {
+            relay.interface_address == interface_address && relay.streamer_url == streamer_url
+        })
+    }
+
     async fn remove_relays(&mut self) {
         let mut relays_to_keep: Vec<ServiceRelay> = Vec::new();
         let mut relays_to_remove: Vec<ServiceRelay> = Vec::new();
         for relay in self.relays.drain(..) {
-            if self
-                .network_interfaces
-                .iter()
-                .any(|interface| get_first_ipv4_address(interface) == Some(relay.interface_address))
-            {
+            if Self::should_keep_relay(&self.network_interfaces, relay.interface_address) {
                 relays_to_keep.push(relay);
             } else {
                 relays_to_remove.push(relay);
@@ -245,8 +288,17 @@ impl RelayService {
                 relay.streamer_name,
                 relay.streamer_url
             );
-            relay.relay.lock().await.stop().await;
+            relay.relay.stop().await;
         }
+    }
+
+    fn should_keep_relay(
+        network_interfaces: &[NetworkInterface],
+        interface_address: Ipv4Addr,
+    ) -> bool {
+        network_interfaces
+            .iter()
+            .any(|interface| get_first_ipv4_address(interface) == Some(interface_address))
     }
 }
 
@@ -257,4 +309,34 @@ fn get_first_ipv4_address(interface: &NetworkInterface) -> Option<Ipv4Addr> {
         }
     }
     None
+}
+
+pub struct RelayService {
+    inner: Arc<Mutex<RelayServiceInner>>,
+}
+
+impl RelayService {
+    pub fn new(
+        password: String,
+        network_interfaces_to_allow: Vec<String>,
+        network_interfaces_to_ignore: Vec<String>,
+        get_status: Option<GetStatusClosure>,
+    ) -> Self {
+        Self {
+            inner: RelayServiceInner::new(
+                password,
+                network_interfaces_to_allow,
+                network_interfaces_to_ignore,
+                get_status,
+            ),
+        }
+    }
+
+    pub async fn start(&self) {
+        self.inner.lock().await.start().await;
+    }
+
+    pub async fn stop(&self) {
+        self.inner.lock().await.stop().await;
+    }
 }
