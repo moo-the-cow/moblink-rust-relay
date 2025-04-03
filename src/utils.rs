@@ -1,5 +1,6 @@
 use log::{error, info, warn};
 use rand::distr::{Alphanumeric, SampleString};
+use tokio::net::lookup_host;
 use tokio::process::Command;
 
 pub const MDNS_SERVICE_TYPE: &str = "_moblink._tcp.local.";
@@ -28,4 +29,19 @@ pub async fn execute_command(executable: &str, args: &[&str]) {
 
 pub fn format_command(executable: &str, args: &[&str]) -> String {
     format!("{} {}", executable, args.join(" "))
+}
+
+pub async fn resolve_host(address: &str) -> Result<String, AnyError> {
+    match lookup_host(format!("{}:9999", address)).await {
+        Ok(mut addresses) => {
+            if let Some(address) = addresses.next() {
+                Ok(address.ip().to_string())
+            } else {
+                Err(format!("No address found for {}", address).into())
+            }
+        }
+        Err(error) => {
+            Err(format!("DNS lookup for '{}' failed with error {}", address, error).into())
+        }
+    }
 }

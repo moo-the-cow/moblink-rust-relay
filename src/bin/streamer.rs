@@ -38,11 +38,15 @@ struct Args {
 
     /// Streaming destination address
     #[arg(long)]
-    destination_address: String,
+    destination_address: Option<String>,
 
     /// Streaming destination port
     #[arg(long)]
-    destination_port: u16,
+    destination_port: Option<u16>,
+
+    /// BELABOX mode
+    #[arg(long)]
+    belabox: bool,
 
     /// Log level
     #[arg(long, default_value = "info")]
@@ -62,6 +66,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
     setup_logging(&args.log_level);
 
+    if !args.belabox {
+        if args.destination_address.is_none() {
+            return Err("--destination-address is required when --belabox is not given.".into());
+        }
+        if args.destination_port.is_none() {
+            return Err("--destination-port is required when --belabox is not given.".into());
+        }
+    }
+
     let streamer = streamer::Streamer::new(
         args.id,
         args.name,
@@ -69,8 +82,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         args.websocket_server_port,
         args.tun_ip_network,
         args.password,
-        args.destination_address,
-        args.destination_port,
+        args.destination_address.unwrap_or_default(),
+        args.destination_port.unwrap_or_default(),
+        args.belabox,
     )?;
     streamer.start().await?;
 
