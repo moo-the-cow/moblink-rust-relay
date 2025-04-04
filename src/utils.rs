@@ -1,4 +1,5 @@
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 use log::{error, info, warn};
 use network_interface::{Addr, NetworkInterface};
@@ -35,18 +36,22 @@ pub fn format_command(executable: &str, args: &[&str]) -> String {
 }
 
 pub async fn resolve_host(address: &str) -> Result<String, AnyError> {
-    match lookup_host(format!("{}:9999", address)).await {
-        Ok(mut addresses) => {
-            if let Some(address) = addresses.next() {
-                Ok(address.ip().to_string())
-            } else {
-                Err(format!("No address found for {}", address).into())
+    for _ in 0..50 {
+        match lookup_host(format!("{}:9999", address)).await {
+            Ok(mut addresses) => {
+                if let Some(address) = addresses.next() {
+                    return Ok(address.ip().to_string());
+                } else {
+                    warn!("No address found for {}", address);
+                }
+            }
+            Err(error) => {
+                warn!("DNS lookup for '{}' failed with error {}", address, error);
             }
         }
-        Err(error) => {
-            Err(format!("DNS lookup for '{}' failed with error {}", address, error).into())
-        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
+    Err("DNS lookup failed after timeout".into())
 }
 
 pub fn get_first_ipv4_address(interface: &NetworkInterface) -> Option<Ipv4Addr> {
