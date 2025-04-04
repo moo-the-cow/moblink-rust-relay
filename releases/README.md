@@ -5,5 +5,3 @@
 
 ### Important Note
 since version 0.7.0 the binaries are called `moblink-relay` instead of `moblink-rust-relay`
-
-I will leave the old version for now as this could be a good chance for a fallback binary in case something is wrong with a new release
