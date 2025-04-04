@@ -25,21 +25,21 @@ jobs:
     - name: Move Binary (on success)
       run: |
         mkdir -p releases/linux_x86_64
-        mv target/release/moblink-rust-relay releases/linux_x86_64/moblink-rust-relay
-        mv target/mips-unknown-linux-musl/release/moblink-rust-relay releases/linux_mips_musl/moblink-rust-relay
+        mv target/release/moblink-relay releases/linux_x86_64/moblink-relay
+        mv target/mips-unknown-linux-musl/release/moblink-relay releases/linux_mips_musl/moblink-relay
 
     - name: Upload X86_64 Binary
       uses: actions/upload-artifact@v4
       with:
-        name: moblink-rust-relay-linux_x86_64
-        path: releases/linux_x86_64/moblink-rust-relay
+        name: moblink-relay-linux_x86_64
+        path: releases/linux_x86_64/moblink-relay
         retention-days: 1  # Store the artifact temporarily
 
     - name: Upload X86_64 Binary
       uses: actions/upload-artifact@v4
       with:
-        name: moblink-rust-relay-linux_mips_musl
-        path: releases/linux_mips_musl/moblink-rust-relay
+        name: moblink-relay-linux_mips_musl
+        path: releases/linux_mips_musl/moblink-relay
         retention-days: 1  # Store the artifact temporarily
 
   build_linux_arm64:
@@ -54,13 +54,13 @@ jobs:
     - name: Move Binary (on success)
       run: |
         mkdir -p releases/linux_arm64
-        mv target/release/moblink-rust-relay releases/linux_arm64/moblink-rust-relay
+        mv target/release/moblink-relay releases/linux_arm64/moblink-relay
 
     - name: Upload ARM64 Binary
       uses: actions/upload-artifact@v4
       with:
-        name: moblink-rust-relay-linux_arm64
-        path: releases/linux_arm64/moblink-rust-relay
+        name: moblink-relay-linux_arm64
+        path: releases/linux_arm64/moblink-relay
         retention-days: 1  # Store the artifact temporarily
 
   commit_and_push:
@@ -73,25 +73,25 @@ jobs:
     - name: Download X86_64 Binary
       uses: actions/download-artifact@v4
       with:
-        name: moblink-rust-relay-linux_x86_64
+        name: moblink-relay-linux_x86_64
         path: releases/linux_x86_64
 
     - name: Download linux_mips_musl Binary
       uses: actions/download-artifact@v4
       with:
-        name: moblink-rust-relay-linux_mips_musl
+        name: moblink-relay-linux_mips_musl
         path: releases/linux_mips_musl
 
     - name: Download ARM64 Binary
       uses: actions/download-artifact@v4
       with:
-        name: moblink-rust-relay-linux_arm64
+        name: moblink-relay-linux_arm64
         path: releases/linux_arm64
 
     - name: Commit and Push Both Binaries
       run: |
         git config --global user.name "GitHub Actions"
         git config --global user.email "actions@github.com"
-        git add releases/linux_x86_64/moblink-rust-relay releases/linux_arm64/moblink-rust-relay releases/linux_mips_musl/moblink-rust-relay
+        git add releases/linux_x86_64/moblink-relay releases/linux_arm64/moblink-relay releases/linux_mips_musl/moblink-relay
         git commit -m "Update binaries for latest release" || echo "No changes to commit"
         git push origin HEAD:${{ github.ref_name }}
