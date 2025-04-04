@@ -1,9 +1,11 @@
 [package]
 name = "moblink-rust"
-version = "0.6.0"
-edition = "2021"
+version = "0.7.0"
+edition = "2024"
 description = "Use spare devices as extra SRTLA bonding connections"
 license = "MIT"
+homepage = "https://github.com/datagutt/moblink-rust"
+repository = "https://github.com/datagutt/moblink-rust"
 
 # This defines the library
 [lib]
@@ -11,8 +13,16 @@ name = "moblink_rust"
 path = "src/lib.rs"
 
 [[bin]]
-name = "moblink-rust-relay"
-path = "src/main.rs"
+name = "moblink-relay"
+path = "src/bin/relay.rs"
+
+[[bin]]
+name = "moblink-relay-service"
+path = "src/bin/relay_service.rs"
+
+[[bin]]
+name = "moblink-streamer"
+path = "src/bin/streamer.rs"
 
 [dependencies]
 base64 = "0.22.1"
@@ -26,17 +36,17 @@ serde_json = "1.0.135"
 url = "2.5.4"
 log = "0.4"
 env_logger = "0.11"
-anstyle = "1.0.10"
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
 pnet = "0.35.0"
 socket2 = "0.5.8"
 mdns-sd = "0.13.1"
-
-#pnet = { version = "0.35.0", default-features = false }
-#socket2 = { version = "0.5.8", default-features = false }
-
+rand = "0.9.0"
+tun = { version = "0.7.17", features = ["async"] }
+packet = "0.1.4"
+tokio-util = "0.7.14"
+ipnetwork = "0.21.1"
+gethostname = "1.0.1"
+network-interface = "2.0.1"
 # Add these exact dependency specifications:
 libc = "=0.2.169"
 getrandom = "=0.3.1" 
-#rand = "=0.8.5"
-#rand_core = "=0.6.4"

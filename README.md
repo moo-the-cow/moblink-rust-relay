@@ -1,4 +1,4 @@
-# Moblink Rust Relay
+# Moblink (Rust🦀 edition)
 
 Use spare devices as extra SRTLA bonding connections. The same functionality is part of [Moblin](https://github.com/eerimoq/moblin) on iOS.
 
@@ -13,24 +13,29 @@ Originally inspired by the Moblink Kotlin/Android code.
 
 ## Requirements
 
-- **Rust** (stable, e.g., 1.70+)
+- **Rust** (stable, e.g., 1.85+)
 - **Cargo** (for building)
 
 ## Usage
 
+### Build
+
 ```bash
 # 1. Clone this repository (or copy the code)
-git clone https://github.com/datagutt/moblink-rust-relay.git
-cd moblink-rust-relay
+git clone https://github.com/datagutt/moblink-rust.git
+cd moblink-rust
 
 # Set nightly (optional)
 rustup override set nightly
 
 # 2. Build the project
 cargo build --release
+```
 
-# 3. Run the relay
-./target/release/moblink-rust-relay \
+### Run Relay
+
+```bash
+./target/release/moblink-relay \
   --name "RelayName" \
   --id "UUID" \
   --streamer-url ws://192.168.1.2:7777 \
@@ -39,14 +44,14 @@ cargo build --release
   --log-level debug
 ```
 
-### Command-Line Arguments
+#### Command-Line Arguments
 
 | Argument         | Description                                                                  | Default       | Example                                     |
 |------------------|------------------------------------------------------------------------------|---------------|---------------------------------------------|
-| `--name`         | Name to identify the relay                                                   | `Relay`       | `--name CameraRelay1`                       |
+| `--name`         | Name to identify the relay                                                   | Hostname      | `--name CameraRelay1`                       |
 | `--id`           | UUID to identify the Relay                                                   | Generated     | `--id UUID`                                 |
-| `--streamer-url` | WebSocket URL to connect to the streamer                                     | _None_ (multicast DNS)        | `--streamer-url wss://example.com/ws`       |
-| `--password`     | Password used in the challenge–response authentication                       | _None_        | `--password mySecret`                       |
+| `--streamer-url` | WebSocket URL to connect to the streamer                                     | _None_ (multicast DNS) | `--streamer-url wss://example.com/ws` |
+| `--password`     | Password used in the challenge–response authentication                       | `1234`        | `--password mySecret`                       |
 | `--log-level`    | Logging verbosity (e.g., error, warn, info, debug, trace)                    | `info`        | `--log-level debug`                         |
 | `--bind-address` | Local modem IP address to bind for UDP socket                                | `0.0.0.0`     | `--bind-address 192.168.1.10`               |
 | `--status-executable` | Status executable. Print status to standard output on format {"batteryPercentage": 93} | _None_ | `--status-executable ./status.sh`   |
@@ -54,12 +59,30 @@ cargo build --release
 
 Relay status (today only battery percentage) is sent to the streamer if `--status-executable` or `--status-file` is given and outputting a valid JSON object as seen above.
 
-### Bind to multiple addresses/interface
+### Run Streamer
 
-We no longer support binding to multiple addresses.
-Please start multiple instances of the relay for each interface.
+```bash
+./target/release/moblink-streamer \
+  --websocket-server-address 192.168.1.2 \
+  --destination-address 172.120.50.214 \
+  --destination-port 5000
+```
 
-## Architecture
+#### Command-Line Arguments
+
+| Argument         | Description                                                                  | Default       | Example                                     |
+|------------------|------------------------------------------------------------------------------|---------------|---------------------------------------------|
+| `--name`         | Name to identify the streamer                                                | Hostname      | `--name CameraRelay1`                       |
+| `--id`           | Id to identify the streamer using multicast DNS                              | Hostname      | `--id UUID`                                 |
+| `--password`     | Password used in the challenge–response authentication                       | `1234`        | `--password mySecret`                       |
+| `--log-level`    | Logging verbosity (e.g., error, warn, info, debug, trace)                    | `info`        | `--log-level debug`                         |
+| `--websocket-server-address` | Local IP address to bind websocket server to                     |               | `--websocket-server-address 192.168.1.10`   |
+| `--websocket-server-port` | Local port to bind the websocket server to                          | `7777`        | `--websocket-server-port 7778`              |
+| `--tun-ip-network` | TUN IP network (CIDR notation). TUN network interfaces will be assigned IP addresses from this network. | `10.3.3.0/24` | `--tun-ip-network 10.1.1.0/24` |
+| `--destination-address` | Streaming destination address                                         |               | `--status-file status.json`                 |
+| `--destination-port` | Streaming destination port                                               |               | `--status-file status.json`                 |
+
+## Relay Architecture
 
 1. **WebSocket Connection**  
    - Establishes a WebSocket to `streamer_url`, or if not provided, tries to find nearby Moblink streamers through multicast DNS.
@@ -82,4 +105,4 @@ Please start multiple instances of the relay for each interface.
 
 **License**: This project is distributed under the terms of the MIT license.
 
-Enjoy using **Moblink Rust Relay**!
+Enjoy using **Moblink**!

@@ -1,25 +1,27 @@
-use serde::Deserialize;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 
-use base64::engine::general_purpose;
-use base64::Engine as _;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info};
-use sha2::{Digest, Sha256};
+use serde::Deserialize;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::process::Command;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use uuid::Uuid;
 
 use crate::protocol::*;
+use crate::utils::AnyError;
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     pub battery_percentage: Option<i32>,
@@ -28,11 +30,11 @@ pub struct Status {
 pub type GetStatusClosure =
     Box<dyn Fn() -> Pin<Box<dyn Future<Output = Status> + Send + Sync>> + Send + Sync>;
 
-pub struct Relay {
+struct RelayInner {
     me: Weak<Mutex<Self>>,
     /// Store a local IP address  for binding UDP sockets
     bind_address: String,
-    relay_id: String,
+    relay_id: Uuid,
     streamer_url: String,
     password: String,
     name: String,
@@ -46,13 +48,13 @@ pub struct Relay {
     start_on_reconnect_soon: Arc<Mutex<bool>>,
 }
 
-impl Relay {
-    pub fn new() -> Arc<Mutex<Self>> {
+impl RelayInner {
+    fn new() -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
                 me: me.clone(),
                 bind_address: Self::get_default_bind_address(),
-                relay_id: "".to_string(),
+                relay_id: Uuid::new_v4(),
                 streamer_url: "".to_string(),
                 password: "".to_string(),
                 name: "".to_string(),
@@ -68,23 +70,23 @@ impl Relay {
         })
     }
 
-    pub fn set_bind_address(&mut self, address: String) {
+    fn set_bind_address(&mut self, address: String) {
         self.bind_address = address;
     }
 
-    pub async fn setup<F>(
+    async fn setup<F>(
         &mut self,
         streamer_url: String,
         password: String,
-        relay_id: String,
+        relay_id: Uuid,
         name: String,
         on_status_updated: F,
-        get_status: GetStatusClosure,
+        get_status: Option<GetStatusClosure>,
     ) where
         F: Fn(String) + Send + Sync + 'static,
     {
         self.on_status_updated = Some(Box::new(on_status_updated));
-        self.get_status = Some(Arc::new(get_status));
+        self.get_status = get_status.map(Arc::new);
         self.relay_id = relay_id;
         self.streamer_url = streamer_url;
         self.password = password;
@@ -92,18 +94,18 @@ impl Relay {
         info!("Binding to address: {:?}", self.bind_address);
     }
 
-    pub fn is_started(&self) -> bool {
+    fn is_started(&self) -> bool {
         self.started
     }
 
-    pub async fn start(&mut self) {
+    async fn start(&mut self) {
         if !self.started {
             self.started = true;
             self.start_internal().await;
         }
     }
 
-    pub async fn stop(&mut self) {
+    async fn stop(&mut self) {
         if self.started {
             self.started = false;
             self.stop_internal().await;
@@ -187,17 +189,20 @@ impl Relay {
                 match result {
                     Ok(message) => match message {
                         Message::Text(text) => {
-                            if let Ok(message) = serde_json::from_str::<MessageToRelay>(&text) {
-                                relay.handle_message(message).await.ok();
-                            } else {
-                                error!("Failed to deserialize message: {}", text);
+                            match serde_json::from_str::<MessageToRelay>(&text) {
+                                Ok(message) => {
+                                    relay.handle_message(message).await.ok();
+                                }
+                                _ => {
+                                    error!("Failed to deserialize message: {}", text);
+                                }
                             }
                         }
                         Message::Binary(data) => {
                             debug!("Received binary message of length: {}", data.len());
                         }
-                        Message::Ping(_) => {
-                            debug!("Received ping message");
+                        Message::Ping(data) => {
+                            relay.send_message(Message::Pong(data)).await.ok();
                         }
                         Message::Pong(_) => {
                             debug!("Received pong message");
@@ -229,10 +234,13 @@ impl Relay {
     async fn stop_internal(&mut self) {
         info!("Stop internal");
         if let Some(mut ws_writer) = self.ws_writer.take() {
-            if let Err(e) = ws_writer.close().await {
-                error!("Error closing WebSocket: {}", e);
-            } else {
-                info!("WebSocket closed successfully");
+            match ws_writer.close().await {
+                Err(e) => {
+                    error!("Error closing WebSocket: {}", e);
+                }
+                _ => {
+                    info!("WebSocket closed successfully");
+                }
             }
         }
         self.connected = false;
@@ -282,10 +290,7 @@ impl Relay {
         });
     }
 
-    async fn handle_message(
-        &mut self,
-        message: MessageToRelay,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message(&mut self, message: MessageToRelay) -> Result<(), AnyError> {
         match message {
             MessageToRelay::Hello(hello) => self.handle_message_hello(hello).await,
             MessageToRelay::Identified(identified) => {
@@ -295,27 +300,21 @@ impl Relay {
         }
     }
 
-    async fn handle_message_hello(
-        &mut self,
-        hello: Hello,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message_hello(&mut self, hello: Hello) -> Result<(), AnyError> {
         let authentication = calculate_authentication(
             &self.password,
             &hello.authentication.salt,
             &hello.authentication.challenge,
         );
         let identify = Identify {
-            id: self.relay_id.clone(),
+            id: self.relay_id,
             name: self.name.clone(),
             authentication,
         };
         self.send(MessageToStreamer::Identify(identify)).await
     }
 
-    async fn handle_message_identified(
-        &mut self,
-        identified: Identified,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message_identified(&mut self, identified: Identified) -> Result<(), AnyError> {
         match identified.result {
             MoblinkResult::Ok(_) => {
                 self.connected = true;
@@ -328,10 +327,7 @@ impl Relay {
         Ok(())
     }
 
-    async fn handle_message_request(
-        &mut self,
-        request: MessageRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_message_request(&mut self, request: MessageRequest) -> Result<(), AnyError> {
         match &request.data {
             MessageRequestData::StartTunnel(start_tunnel) => {
                 self.handle_message_request_start_tunnel(&request, start_tunnel)
@@ -345,7 +341,7 @@ impl Relay {
         &mut self,
         request: &MessageRequest,
         start_tunnel: &StartTunnelRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), AnyError> {
         // Pick bind addresses from the relay
         let local_bind_addr_for_streamer = parse_socket_addr("0.0.0.0")?;
         let local_bind_addr_for_destination = parse_socket_addr(&self.bind_address)?;
@@ -447,29 +443,86 @@ impl Relay {
     async fn handle_message_request_status(
         &mut self,
         request: MessageRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let Some(get_status) = self.get_status.as_ref() else {
-            error!("get_battery_percentage is not set");
-            return Err("get_battery_percentage function not set".into());
-        };
-        let status = get_status().await;
-        let data = ResponseData::Status(StatusResponseData {
-            battery_percentage: status.battery_percentage,
-        });
+    ) -> Result<(), AnyError> {
+        let mut battery_percentage = None;
+        if let Some(get_status) = self.get_status.as_ref() {
+            battery_percentage = get_status().await.battery_percentage;
+        }
+        let data = ResponseData::Status(StatusResponseData { battery_percentage });
         let response = request.to_ok_response(data);
         self.send(MessageToStreamer::Response(response)).await
     }
 
-    async fn send(
-        &mut self,
-        message: MessageToStreamer,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn send(&mut self, message: MessageToStreamer) -> Result<(), AnyError> {
         let text = serde_json::to_string(&message)?;
+        self.send_message(Message::Text(text.into())).await
+    }
+
+    async fn send_message(&mut self, message: Message) -> Result<(), AnyError> {
         let Some(writer) = self.ws_writer.as_mut() else {
             return Err("No websocket writer".into());
         };
-        writer.send(Message::Text(text.into())).await?;
+        writer.send(message).await?;
         Ok(())
+    }
+}
+
+pub struct Relay {
+    inner: Arc<Mutex<RelayInner>>,
+}
+
+impl Default for Relay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Relay {
+    pub fn new() -> Self {
+        Self {
+            inner: RelayInner::new(),
+        }
+    }
+
+    pub async fn set_bind_address(&self, address: String) {
+        self.inner.lock().await.set_bind_address(address);
+    }
+
+    pub async fn setup<F>(
+        &self,
+        streamer_url: String,
+        password: String,
+        relay_id: Uuid,
+        name: String,
+        on_status_updated: F,
+        get_status: Option<GetStatusClosure>,
+    ) where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        self.inner
+            .lock()
+            .await
+            .setup(
+                streamer_url,
+                password,
+                relay_id,
+                name,
+                on_status_updated,
+                get_status,
+            )
+            .await;
+    }
+
+    pub async fn is_started(&self) -> bool {
+        self.inner.lock().await.is_started()
+    }
+
+    pub async fn start(&self) {
+        self.inner.lock().await.start().await;
+    }
+
+    pub async fn stop(&self) {
+        self.inner.lock().await.stop().await;
     }
 }
 
@@ -601,15 +654,6 @@ fn start_relay_from_destination_to_streamer(
     })
 }
 
-fn calculate_authentication(password: &str, salt: &str, challenge: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{}{}", password, salt).as_bytes());
-    let hash1 = hasher.finalize_reset();
-    hasher.update(format!("{}{}", general_purpose::STANDARD.encode(hash1), challenge).as_bytes());
-    let hash2 = hasher.finalize();
-    general_purpose::STANDARD.encode(hash2)
-}
-
 async fn create_dual_stack_udp_socket(
     addr: SocketAddr,
 ) -> Result<tokio::net::UdpSocket, std::io::Error> {
@@ -660,4 +704,43 @@ fn parse_socket_addr(addr_str: &str) -> Result<SocketAddr, std::io::Error> {
         std::io::ErrorKind::InvalidInput,
         "Invalid socket address syntax. Expected 'IP:port' or 'IP'.",
     ))
+}
+
+pub fn create_get_status_closure(
+    status_executable: &Option<String>,
+    status_file: &Option<String>,
+) -> Option<GetStatusClosure> {
+    let status_executable = status_executable.clone();
+    let status_file = status_file.clone();
+    Some(Box::new(move || {
+        let status_executable = status_executable.clone();
+        let status_file = status_file.clone();
+        Box::pin(async move {
+            let output = if let Some(status_executable) = &status_executable {
+                let Ok(output) = Command::new(status_executable).output().await else {
+                    return Default::default();
+                };
+                output.stdout
+            } else if let Some(status_file) = &status_file {
+                let Ok(mut file) = File::open(status_file).await else {
+                    return Default::default();
+                };
+                let mut contents = vec![];
+                if file.read_to_end(&mut contents).await.is_err() {
+                    return Default::default();
+                }
+                contents
+            } else {
+                return Default::default();
+            };
+            let output = String::from_utf8(output).unwrap_or_default();
+            match serde_json::from_str(&output) {
+                Ok(status) => status,
+                Err(e) => {
+                    error!("Failed to decode status with error: {e}");
+                    Default::default()
+                }
+            }
+        })
+    }))
 }
