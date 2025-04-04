@@ -8,9 +8,8 @@ use std::time::Duration;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use ipnetwork::Ipv4Network;
-use log::{debug, error, info, warn};
-use mdns_sd::{ServiceDaemon, ServiceInfo};
-use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+use log::{debug, error, info};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 use notify::event::AccessKind;
 use notify::{self, EventKind, Watcher};
 use packet::{Builder as _, Packet, ip, udp};
@@ -33,9 +32,7 @@ use crate::protocol::{
     MessageResponse, MessageToRelay, MessageToStreamer, MoblinkResult, Present, ResponseData,
     StartTunnelRequest, calculate_authentication,
 };
-use crate::utils::{
-    AnyError, execute_command, get_first_ipv4_address, random_string, resolve_host,
-};
+use crate::utils::{AnyError, execute_command, random_string, resolve_host};
 use crate::{MDNS_SERVICE_TYPE, belaui};
 
 type WebSocketWriter = SplitSink<WebSocketStream<TcpStream>, Message>;
@@ -683,7 +680,6 @@ struct StreamerInner {
     relays: Vec<Arc<Mutex<Relay>>>,
     unique_indexes: Vec<u32>,
     tun_ip_network: Ipv4Network,
-    ethernet_network_interfaces: Vec<NetworkInterface>,
     service_daemon: ServiceDaemon,
 }
 
@@ -714,8 +710,7 @@ impl StreamerInner {
                 relays: Vec::new(),
                 unique_indexes: (0..tun_ip_network.size() - 1).collect(),
                 tun_ip_network,
-                ethernet_network_interfaces: Vec::new(),
-                service_daemon: ServiceDaemon::new().unwrap(),
+                service_daemon: Self::create_service_daemon(),
             })
         }))
     }
@@ -730,8 +725,16 @@ impl StreamerInner {
             self.destination_address = resolve_host(&self.destination_address).await?;
         }
         self.start_relay_listener().await?;
-        self.start_network_interfaces_monitor();
+        self.start_mdns_daemon();
         Ok(())
+    }
+
+    fn create_service_daemon() -> ServiceDaemon {
+        let service_daemon = ServiceDaemon::new().unwrap();
+        service_daemon
+            .disable_interface(Vec::from([IfKind::IPv6]))
+            .ok();
+        service_daemon
     }
 
     async fn start_relay_listener(
@@ -815,40 +818,7 @@ impl StreamerInner {
         });
     }
 
-    fn start_network_interfaces_monitor(&mut self) {
-        let streamer = self.me.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok(interfaces) = NetworkInterface::show() else {
-                    break;
-                };
-                let Some(streamer) = streamer.upgrade() else {
-                    break;
-                };
-                streamer
-                    .lock()
-                    .await
-                    .network_interfaces_updated(interfaces)
-                    .await;
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
-    }
-
-    async fn network_interfaces_updated(&mut self, mut interfaces: Vec<NetworkInterface>) {
-        interfaces.retain(|interface| interface.mac_addr.is_some());
-        interfaces.sort_by(|a, b| a.name.cmp(&b.name));
-        if self.ethernet_network_interfaces == interfaces {
-            return;
-        }
-        info!("Ethernet network interfaces changed. Trying to start mDNS daemon.");
-        self.ethernet_network_interfaces = interfaces;
-        if let Err(error) = self
-            .service_daemon
-            .unregister(&format!("{}.{}", self.id, MDNS_SERVICE_TYPE))
-        {
-            warn!("Failed to unregister mDNS service with error: {}", error);
-        }
+    fn start_mdns_daemon(&mut self) {
         match self.create_mdns_service_info() {
             Ok(service_info) => {
                 if let Err(error) = self.service_daemon.register(service_info) {
@@ -879,30 +849,17 @@ impl StreamerInner {
     }
 
     fn create_mdns_service_info(&self) -> Result<ServiceInfo, AnyError> {
-        let addresses = self.find_mdns_addresses();
-        if addresses.is_empty() {
-            return Err("No suitable network interfaces available".into());
-        }
         let properties = HashMap::from([("name".to_string(), self.name.clone())]);
         let service_info = ServiceInfo::new(
             MDNS_SERVICE_TYPE,
             &self.id,
             &format!("{}.local.", self.id),
-            addresses.join(","),
+            "",
             self.port,
             properties,
-        )?;
+        )?
+        .enable_addr_auto();
         Ok(service_info)
-    }
-
-    fn find_mdns_addresses(&self) -> Vec<String> {
-        let mut addresses = Vec::new();
-        for interface in &self.ethernet_network_interfaces {
-            if let Some(address) = get_first_ipv4_address(interface) {
-                addresses.push(address.to_string());
-            }
-        }
-        addresses
     }
 
     async fn handle_relay_connection(&mut self, tcp_stream: TcpStream, relay_address: SocketAddr) {
