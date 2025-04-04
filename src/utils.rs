@@ -1,4 +1,7 @@
+use std::net::Ipv4Addr;
+
 use log::{error, info, warn};
+use network_interface::{Addr, NetworkInterface};
 use rand::distr::{Alphanumeric, SampleString};
 use tokio::net::lookup_host;
 use tokio::process::Command;
@@ -44,4 +47,13 @@ pub async fn resolve_host(address: &str) -> Result<String, AnyError> {
             Err(format!("DNS lookup for '{}' failed with error {}", address, error).into())
         }
     }
+}
+
+pub fn get_first_ipv4_address(interface: &NetworkInterface) -> Option<Ipv4Addr> {
+    for address in &interface.addr {
+        if let Addr::V4(address) = address {
+            return Some(address.ip);
+        }
+    }
+    None
 }

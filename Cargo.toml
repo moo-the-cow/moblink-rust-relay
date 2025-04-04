@@ -39,7 +39,7 @@ env_logger = "0.11"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 pnet = "0.35.0"
 socket2 = "0.5.8"
-mdns-sd = "0.13.1"
+mdns-sd = "0.13.5"
 rand = "0.9.0"
 tun = { version = "0.7.17", features = ["async"] }
 packet = "0.1.4"

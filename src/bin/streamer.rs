@@ -23,8 +23,8 @@ struct Args {
     #[arg(long, default_value = "1234")]
     password: String,
 
-    /// Websocket server listener address. Used for mDNS-SD as well right now.
-    #[arg(long)]
+    /// Websocket server listener address.
+    #[arg(long, default_value = "0.0.0.0")]
     websocket_server_address: String,
 
     /// Websocket server listener port
