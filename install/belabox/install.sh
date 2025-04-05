@@ -54,31 +54,35 @@ rm -rf $WORKSPACE
 mkdir $WORKSPACE
 cd $WORKSPACE
 
+echo "- Stopping moblink systemd services (if running)"
 systemctl stop moblink-streamer || true
 systemctl stop moblink-relay-service || true
 
-# Download architecture-specific binaries
-wget "$LATEST_RELEASE_URL/moblink-relay-$TARGET"
-wget "$LATEST_RELEASE_URL/moblink-relay-service-$TARGET"
-wget "$LATEST_RELEASE_URL/moblink-streamer-$TARGET"
+echo "- Downloading moblink binaries"
+wget -q --show-progress "$LATEST_RELEASE_URL/moblink-relay-$TARGET"
+wget -q --show-progress "$LATEST_RELEASE_URL/moblink-relay-service-$TARGET"
+wget -q --show-progress "$LATEST_RELEASE_URL/moblink-streamer-$TARGET"
 
-# Download systemd files from release (source code)
-wget "$LATEST_RELEASE_SOURCE_CODE_URL"
+echo "- Downloading moblink systemd service files"
+wget -q --show-progress "$LATEST_RELEASE_SOURCE_CODE_URL"
 tar -xzf "$LATEST_TAG.tar.gz"
 cp moblink-rust-$VERSION/install/belabox/systemd/moblink-relay-service.service /etc/systemd/system/
 cp moblink-rust-$VERSION/install/belabox/systemd/moblink-streamer.service /etc/systemd/system/
 
-# Make binaries executable and move to /usr/local/bin
+echo "- Making moblink binaries executable and moving them to /usr/local/bin"
 chmod +x moblink-relay-$TARGET moblink-relay-service-$TARGET moblink-streamer-$TARGET
 mv moblink-relay-$TARGET /usr/local/bin/moblink-relay
 mv moblink-relay-service-$TARGET /usr/local/bin/moblink-relay-service
 mv moblink-streamer-$TARGET /usr/local/bin/moblink-streamer
 
+echo "- Enabling and starting moblink systemd services"
 systemctl enable moblink-streamer
 systemctl start moblink-streamer
 
 systemctl enable moblink-relay-service
 systemctl start moblink-relay-service
 
-cd -
+cd ..
 rm -rf $WORKSPACE
+
+echo "- Done!"
