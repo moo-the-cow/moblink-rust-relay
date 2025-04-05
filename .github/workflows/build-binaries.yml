@@ -48,9 +48,12 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
+        if: matrix.job.target == 'mips-unknown-linux-musl'
         with:
-          targets: ${{ matrix.job.target }}
           toolchain: nightly-2025-02-13
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cross
         if: matrix.job.use-cross
@@ -65,7 +68,7 @@ jobs:
 
       - name: Build
         shell: bash
-        run: $BUILD_CMD build --release --target=${{ matrix.job.target }}
+        run: $BUILD_CMD build --release --target=${{ matrix.job.target }} -Z build-std
 
       - name: Strip binaries
         shell: bash
