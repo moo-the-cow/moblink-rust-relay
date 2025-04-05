@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::MDNS_SERVICE_TYPE;
 use crate::relay::{GetStatusClosure, Relay, Status};
-use crate::utils::get_first_ipv4_address;
+use crate::utils::{get_first_ipv4_address, is_this_machines_address};
 
 struct ServiceRelay {
     interface_name: String,
@@ -200,6 +200,9 @@ impl RelayServiceInner {
                         let Some(address) = info.get_addresses_v4().iter().next().cloned() else {
                             continue;
                         };
+                        if is_this_machines_address(address) {
+                            continue;
+                        }
                         let Some(relay_service) = relay_service.upgrade() else {
                             break;
                         };
