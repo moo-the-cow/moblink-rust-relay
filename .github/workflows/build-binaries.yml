@@ -13,7 +13,6 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-gnu
-          - arm-unknown-linux-gnueabihf
           - aarch64-unknown-linux-gnu
 
     steps:
@@ -37,6 +36,10 @@ jobs:
           strip target/${{ matrix.target }}/release/moblink-relay
           strip target/${{ matrix.target }}/release/moblink-relay-service
           strip target/${{ matrix.target }}/release/moblink-streamer
+          # Rename binaries to include target
+          mv target/${{ matrix.target }}/release/moblink-relay target/${{ matrix.target }}/release/moblink-relay-${{ matrix.target }}
+          mv target/${{ matrix.target }}/release/moblink-relay-service target/${{ matrix.target }}/release/moblink-relay-service-${{ matrix.target }}
+          mv target/${{ matrix.target }}/release/moblink-streamer target/${{ matrix.target }}/release/moblink-streamer-${{ matrix.target }}
           ls -la target/${{ matrix.target }}/release/
 
       - name: Upload to Release
@@ -45,9 +48,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: |
-            target/${{ matrix.target }}/release/moblink-relay
-            target/${{ matrix.target }}/release/moblink-relay-service
-            target/${{ matrix.target }}/release/moblink-streamer
+            target/${{ matrix.target }}/release/moblink-relay-${{ matrix.target }}
+            target/${{ matrix.target }}/release/moblink-relay-service-${{ matrix.target }}
+            target/${{ matrix.target }}/release/moblink-streamer-${{ matrix.target }}
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           body: |

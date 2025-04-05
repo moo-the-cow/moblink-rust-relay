@@ -1,0 +1,12 @@
+[Unit]
+Description=Moblink Streamer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/moblink-streamer --belabox
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target

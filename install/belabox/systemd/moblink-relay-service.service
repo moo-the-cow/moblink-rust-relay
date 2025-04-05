@@ -1,0 +1,12 @@
+[Unit]
+Description=Moblink Relay Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/moblink-relay-service --network-interfaces-to-ignore "mob-.*" --database /etc/moblink-relay-service.json
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
