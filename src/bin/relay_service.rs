@@ -11,11 +11,13 @@ struct Args {
     #[arg(long, default_value = "1234")]
     password: String,
 
-    /// Network interfaces to allow. Localhost is never allowed.
+    /// Network interfaces to allow as a regex (^ prefix and $ suffix are added
+    /// automatically). Localhost is never allowed.
     #[arg(long)]
     network_interfaces_to_allow: Vec<String>,
 
-    /// Network interfaces to ignore. Ignores localhost automatically.
+    /// Network interfaces to ignore as a regex (^ prefix and $ suffix are added
+    /// automatically). Ignores localhost automatically.
     #[arg(long)]
     network_interfaces_to_ignore: Vec<String>,
 

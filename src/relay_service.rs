@@ -2,9 +2,10 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use log::info;
+use log::{error, info};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+use regex::Regex;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -56,11 +57,46 @@ struct Streamer {
     url: String,
 }
 
+struct NetworkInterfaceFilter {
+    patterns_to_allow: Option<Regex>,
+    patterns_to_ignore: Option<Regex>,
+}
+
+impl NetworkInterfaceFilter {
+    fn new(patterns_to_allow: Vec<String>, patterns_to_ignore: Vec<String>) -> Self {
+        Self {
+            patterns_to_allow: Self::compile(patterns_to_allow),
+            patterns_to_ignore: Self::compile(patterns_to_ignore),
+        }
+    }
+
+    fn filter(&self, interfaces: &mut Vec<NetworkInterface>) {
+        if let Some(patterns_to_allow) = &self.patterns_to_allow {
+            interfaces.retain(|interface| patterns_to_allow.is_match(&interface.name));
+        }
+        if let Some(patterns_to_ignore) = &self.patterns_to_ignore {
+            interfaces.retain(|interface| !patterns_to_ignore.is_match(&interface.name));
+        }
+    }
+
+    fn compile(patterns: Vec<String>) -> Option<Regex> {
+        if !patterns.is_empty() {
+            let pattern = format!("^{}$", patterns.join("|"));
+            match Regex::new(&pattern) {
+                Ok(regex) => return Some(regex),
+                Err(error) => {
+                    error!("Failed to compile regex {} with error: {}", pattern, error);
+                }
+            }
+        }
+        None
+    }
+}
+
 struct RelayServiceInner {
     me: Weak<Mutex<Self>>,
     password: String,
-    network_interfaces_to_allow: Vec<String>,
-    network_interfaces_to_ignore: Vec<String>,
+    network_interface_filter: NetworkInterfaceFilter,
     get_status: Option<GetStatusClosure>,
     status: Status,
     relays: Vec<ServiceRelay>,
@@ -82,8 +118,10 @@ impl RelayServiceInner {
             Mutex::new(Self {
                 me: me.clone(),
                 password,
-                network_interfaces_to_allow,
-                network_interfaces_to_ignore,
+                network_interface_filter: NetworkInterfaceFilter::new(
+                    network_interfaces_to_allow,
+                    network_interfaces_to_ignore,
+                ),
                 get_status,
                 status: Default::default(),
                 relays: Vec::new(),
@@ -134,11 +172,7 @@ impl RelayServiceInner {
     }
 
     fn update_network_interfaces(&mut self, mut interfaces: Vec<NetworkInterface>) {
-        if !self.network_interfaces_to_allow.is_empty() {
-            interfaces
-                .retain(|interface| self.network_interfaces_to_allow.contains(&interface.name));
-        }
-        interfaces.retain(|interface| !self.network_interfaces_to_ignore.contains(&interface.name));
+        self.network_interface_filter.filter(&mut interfaces);
         self.network_interfaces = interfaces;
     }
 
