@@ -49,12 +49,15 @@ jobs:
       - name: Install Rust toolchain (MIPS)
         uses: dtolnay/rust-toolchain@nightly
         if: matrix.job.target == 'mips-unknown-linux-musl'
+        with:
+          toolchain: nightly-2025-02-14
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         if: matrix.job.target != 'mips-unknown-linux-musl'
         with:
           targets: ${{ matrix.job.target }}
+          toolchain: nightly-2025-02-14
 
       - name: Install rust-src component
         run: rustup component add rust-src --toolchain nightly-2025-02-14
