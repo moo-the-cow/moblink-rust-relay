@@ -26,11 +26,10 @@ if [ -z "$VERSION" ]; then
 	VERSION=${LATEST_TAG#v}
 else
 	# Add 'v' prefix if not present
-	if [[ ! $VERSION =~ ^v ]]; then
-		LATEST_TAG="v$VERSION"
-	else
-		LATEST_TAG=$VERSION
-	fi
+	case "$VERSION" in
+	v*) LATEST_TAG="$VERSION" ;;
+	*) LATEST_TAG="v$VERSION" ;;
+	esac
 fi
 
 LATEST_RELEASE_URL="https://github.com/$REPO/releases/download/$LATEST_TAG"
