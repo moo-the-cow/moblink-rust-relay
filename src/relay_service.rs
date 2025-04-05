@@ -4,12 +4,13 @@ use std::time::Duration;
 
 use log::info;
 use mdns_sd::{ServiceDaemon, ServiceEvent};
-use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
+use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::MDNS_SERVICE_TYPE;
 use crate::relay::{GetStatusClosure, Relay, Status};
+use crate::utils::get_first_ipv4_address;
 
 struct ServiceRelay {
     interface_name: String,
@@ -300,15 +301,6 @@ impl RelayServiceInner {
             .iter()
             .any(|interface| get_first_ipv4_address(interface) == Some(interface_address))
     }
-}
-
-fn get_first_ipv4_address(interface: &NetworkInterface) -> Option<Ipv4Addr> {
-    for address in &interface.addr {
-        if let Addr::V4(address) = address {
-            return Some(address.ip);
-        }
-    }
-    None
 }
 
 pub struct RelayService {
