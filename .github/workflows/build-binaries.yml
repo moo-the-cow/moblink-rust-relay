@@ -56,8 +56,8 @@ jobs:
         with:
           targets: ${{ matrix.job.target }}
 
-      - name: Rustup component add rust-src
-        run: rustup component add rust-src
+      - name: Install rust-src component
+        run: rustup component add rust-src --toolchain nightly-2025-02-14
 
       - name: Install cross
         if: matrix.job.use-cross
