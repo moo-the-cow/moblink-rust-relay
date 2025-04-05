@@ -11,7 +11,7 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-gnu
-          - mips-unknown-linux-musl
+          - arm-unknown-linux-gnueabihf
           - aarch64-unknown-linux-gnu
 
     steps:
@@ -55,6 +55,6 @@ jobs:
             - moblink-streamer
 
             ### Architectures:
-            - x86_64
-            - MIPS
-            - ARM64
+            - x86_64 (GNU)
+            - ARM (32-bit, hard-float)
+            - ARM64 (GNU)
