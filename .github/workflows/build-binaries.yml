@@ -46,7 +46,7 @@ jobs:
             mips-unknown-linux-musl) sudo apt-get -y update ; sudo apt-get -y install gcc-mips-linux-gnu binutils-mips-linux-gnu musl-tools ;;
           esac
 
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain (MIPS)
         uses: dtolnay/rust-toolchain@nightly
         if: matrix.job.target == 'mips-unknown-linux-musl'
         with:
