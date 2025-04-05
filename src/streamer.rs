@@ -362,7 +362,7 @@ impl Relay {
 
     #[cfg(not(target_os = "macos"))]
     fn tun_device_name(&self) -> String {
-        format!("moblink-{}", self.relay_name.replace(" ", "-"))
+        format!("mob-{}", self.relay_name.replace(" ", "-"))
     }
 
     #[cfg(target_os = "macos")]
