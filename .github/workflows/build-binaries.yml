@@ -6,41 +6,59 @@ on:
 
 jobs:
   build:
+    name: ${{ matrix.job.target }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     strategy:
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
+        job:
+          - { target: x86_64-unknown-linux-gnu, use-cross: true }
+          - { target: aarch64-unknown-linux-gnu, use-cross: true }
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install QEMU
-        if: matrix.target != 'x86_64-unknown-linux-gnu'
+      - name: Install prerequisites
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static
+          case ${{ matrix.job.target }} in
+            aarch64-unknown-linux-gnu) sudo apt-get -y update ; sudo apt-get -y install gcc-aarch64-linux-gnu ;;
+          esac
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.job.target }}
+
+      - name: Install cross
+        if: matrix.job.use-cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Overwrite build command env variable
+        if: matrix.job.use-cross
+        shell: bash
+        run: echo "BUILD_CMD=cross" >> $GITHUB_ENV
 
       - name: Build
+        shell: bash
+        run: $BUILD_CMD build --release --target=${{ matrix.job.target }}
+
+      - name: Strip binaries
+        shell: bash
         run: |
-          cargo build --release --target ${{ matrix.target }}
-          # Strip binaries to reduce size
-          strip target/${{ matrix.target }}/release/moblink-relay
-          strip target/${{ matrix.target }}/release/moblink-relay-service
-          strip target/${{ matrix.target }}/release/moblink-streamer
-          # Rename binaries to include target
-          mv target/${{ matrix.target }}/release/moblink-relay target/${{ matrix.target }}/release/moblink-relay-${{ matrix.target }}
-          mv target/${{ matrix.target }}/release/moblink-relay-service target/${{ matrix.target }}/release/moblink-relay-service-${{ matrix.target }}
-          mv target/${{ matrix.target }}/release/moblink-streamer target/${{ matrix.target }}/release/moblink-streamer-${{ matrix.target }}
-          ls -la target/${{ matrix.target }}/release/
+          strip target/${{ matrix.job.target }}/release/moblink-relay
+          strip target/${{ matrix.job.target }}/release/moblink-relay-service
+          strip target/${{ matrix.job.target }}/release/moblink-streamer
+
+      - name: Rename binaries
+        shell: bash
+        run: |
+          mv target/${{ matrix.job.target }}/release/moblink-relay target/${{ matrix.job.target }}/release/moblink-relay-${{ matrix.job.target }}
+          mv target/${{ matrix.job.target }}/release/moblink-relay-service target/${{ matrix.job.target }}/release/moblink-relay-service-${{ matrix.job.target }}
+          mv target/${{ matrix.job.target }}/release/moblink-streamer target/${{ matrix.job.target }}/release/moblink-streamer-${{ matrix.job.target }}
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
@@ -48,9 +66,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           files: |
-            target/${{ matrix.target }}/release/moblink-relay-${{ matrix.target }}
-            target/${{ matrix.target }}/release/moblink-relay-service-${{ matrix.target }}
-            target/${{ matrix.target }}/release/moblink-streamer-${{ matrix.target }}
+            target/${{ matrix.job.target }}/release/moblink-relay-${{ matrix.job.target }}
+            target/${{ matrix.job.target }}/release/moblink-relay-service-${{ matrix.job.target }}
+            target/${{ matrix.job.target }}/release/moblink-streamer-${{ matrix.job.target }}
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           body: |
@@ -63,5 +81,4 @@ jobs:
 
             ### Architectures:
             - x86_64 (GNU)
-            - ARM (32-bit, hard-float)
             - ARM64 (GNU)
