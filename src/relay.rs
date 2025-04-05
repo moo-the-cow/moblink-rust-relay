@@ -19,7 +19,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use uuid::Uuid;
 
 use crate::protocol::*;
-use crate::utils::AnyError;
+use crate::utils::{AnyError, resolve_host};
 
 #[derive(Default, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -91,7 +91,6 @@ impl RelayInner {
         self.streamer_url = streamer_url;
         self.password = password;
         self.name = name;
-        info!("Binding to address: {:?}", self.bind_address);
     }
 
     fn is_started(&self) -> bool {
@@ -138,7 +137,6 @@ impl RelayInner {
     }
 
     async fn start_internal(&mut self) {
-        info!("Start internal");
         if !self.started {
             self.stop_internal().await;
             return;
@@ -154,14 +152,14 @@ impl RelayInner {
 
         match timeout(Duration::from_secs(10), connect_async(request.to_string())).await {
             Ok(Ok((ws_stream, _))) => {
-                info!("WebSocket connected");
+                debug!("WebSocket connected");
                 let (writer, reader) = ws_stream.split();
                 self.ws_writer = Some(writer);
                 self.start_websocket_receiver(reader);
             }
             Ok(Err(error)) => {
                 // This means the future completed but the connection failed
-                error!("WebSocket connection failed immediately: {}", error);
+                debug!("WebSocket connection failed immediately: {}", error);
                 self.reconnect_soon().await;
             }
             Err(_elapsed) => {
@@ -191,7 +189,11 @@ impl RelayInner {
                         Message::Text(text) => {
                             match serde_json::from_str::<MessageToRelay>(&text) {
                                 Ok(message) => {
-                                    relay.handle_message(message).await.ok();
+                                    if let Err(error) = relay.handle_message(message).await {
+                                        error!("Message handling failed with error: {}", error);
+                                        relay.reconnect_soon().await;
+                                        break;
+                                    }
                                 }
                                 _ => {
                                     error!("Failed to deserialize message: {}", text);
@@ -217,7 +219,7 @@ impl RelayInner {
                         }
                     },
                     Err(e) => {
-                        error!("Error processing message: {}", e);
+                        debug!("Error processing message: {}", e);
                         // TODO: There has to be a better way to handle this
                         if e.to_string()
                             .contains("Connection reset without closing handshake")
@@ -232,14 +234,13 @@ impl RelayInner {
     }
 
     async fn stop_internal(&mut self) {
-        info!("Stop internal");
         if let Some(mut ws_writer) = self.ws_writer.take() {
             match ws_writer.close().await {
                 Err(e) => {
                     error!("Error closing WebSocket: {}", e);
                 }
                 _ => {
-                    info!("WebSocket closed successfully");
+                    debug!("WebSocket closed successfully");
                 }
             }
         }
@@ -278,11 +279,10 @@ impl RelayInner {
         let relay = self.me.clone();
 
         tokio::spawn(async move {
-            info!("Reconnecting in 5 seconds...");
             sleep(Duration::from_secs(5)).await;
 
             if *start_on_reconnect_soon.lock().await {
-                info!("Reconnecting...");
+                debug!("Reconnecting...");
                 if let Some(relay) = relay.upgrade() {
                     relay.lock().await.start_internal().await;
                 }
@@ -346,7 +346,7 @@ impl RelayInner {
         let local_bind_addr_for_streamer = parse_socket_addr("0.0.0.0")?;
         let local_bind_addr_for_destination = parse_socket_addr(&self.bind_address)?;
 
-        info!(
+        debug!(
             "Binding streamer socket on: {}, destination socket on: {}",
             local_bind_addr_for_streamer, local_bind_addr_for_destination
         );
@@ -354,7 +354,6 @@ impl RelayInner {
         // Use dual-stack socket creation.
         let streamer_socket = create_dual_stack_udp_socket(local_bind_addr_for_streamer).await?;
         let streamer_port = streamer_socket.local_addr()?.port();
-        info!("Listening on UDP port: {}", streamer_port);
         let streamer_socket = Arc::new(streamer_socket);
 
         // Inform the server about the chosen port.
@@ -369,13 +368,9 @@ impl RelayInner {
         let destination_socket =
             create_dual_stack_udp_socket(local_bind_addr_for_destination).await?;
 
-        info!(
-            "Bound destination socket to: {:?}",
-            destination_socket.local_addr()?
-        );
         let destination_socket = Arc::new(destination_socket);
-
-        let normalized_ip = match IpAddr::from_str(&start_tunnel.address)? {
+        let destination_address = resolve_host(&start_tunnel.address).await?;
+        let destination_address = match IpAddr::from_str(&destination_address)? {
             IpAddr::V4(v4) => IpAddr::V4(v4),
             IpAddr::V6(v6) => {
                 // If it’s an IPv4-mapped IPv6 like ::ffff:x.x.x.x, convert to real IPv4
@@ -387,22 +382,21 @@ impl RelayInner {
                 }
             }
         };
-        let destination_addr = SocketAddr::new(normalized_ip, start_tunnel.port);
-        info!("Destination address resolved: {}", destination_addr);
 
-        // Use an Arc<Mutex> to share the server_remote_addr between tasks.
-        let streamer_addr: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
+        let destination_address = SocketAddr::new(destination_address, start_tunnel.port);
+        info!("Destination address: {}", destination_address);
+        let streamer_address: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
         let relay_to_destination = start_relay_from_streamer_to_destination(
             streamer_socket.clone(),
             destination_socket.clone(),
-            streamer_addr.clone(),
-            destination_addr,
+            streamer_address.clone(),
+            destination_address,
         );
         let relay_to_streamer = start_relay_from_destination_to_streamer(
             streamer_socket,
             destination_socket,
-            streamer_addr,
+            streamer_address,
         );
 
         *self.reconnect_on_tunnel_error.lock().await = false;
@@ -596,7 +590,7 @@ fn start_relay_from_streamer_to_destination(
 fn start_relay_from_destination_to_streamer(
     streamer_socket: Arc<UdpSocket>,
     destination_socket: Arc<UdpSocket>,
-    streamer_addr: Arc<Mutex<Option<SocketAddr>>>,
+    streamer_address: Arc<Mutex<Option<SocketAddr>>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         debug!("(relay_to_streamer) Task started");
@@ -632,7 +626,7 @@ fn start_relay_from_destination_to_streamer(
                 size, remote_addr
             );
             // Forward to server.
-            let streamer_addr_lock = streamer_addr.lock().await;
+            let streamer_addr_lock = streamer_address.lock().await;
             match *streamer_addr_lock {
                 Some(streamer_addr) => {
                     match streamer_socket.send_to(&buf[..size], &streamer_addr).await {
