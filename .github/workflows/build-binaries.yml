@@ -47,19 +47,17 @@ jobs:
           esac
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@nightly
         if: matrix.job.target == 'mips-unknown-linux-musl'
-        with:
-          toolchain: nightly-2025-02-13
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.job.target }}
 
       - name: Install cross
         if: matrix.job.use-cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev c7dee4d008475ce1c140773cbcd6078f4b86c2aa --locked
 
       - name: Overwrite build command env variable
         if: matrix.job.use-cross
@@ -68,7 +66,7 @@ jobs:
 
       - name: Build
         shell: bash
-        run: $BUILD_CMD build --release --target=${{ matrix.job.target }} -Z build-std
+        run: $BUILD_CMD +nightly-2025-02-14 build --release --target=${{ matrix.job.target }} -Z build-std
 
       - name: Strip binaries
         shell: bash
