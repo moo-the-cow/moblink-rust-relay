@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
@@ -34,6 +35,10 @@ struct Args {
     /// Contains status on format {"batteryPercentage": 93}.
     #[arg(long)]
     status_file: Option<String>,
+
+    /// Database with relay ids
+    #[arg(long, default_value = "moblink-relay-service.json")]
+    database: PathBuf,
 }
 
 fn setup_logging(log_level: &str) {
@@ -54,7 +59,9 @@ async fn main() {
         args.network_interfaces_to_allow,
         args.network_interfaces_to_ignore,
         create_get_status_closure(&args.status_executable, &args.status_file),
-    );
+        args.database,
+    )
+    .await;
     relay_service.start().await;
 
     loop {
