@@ -7,7 +7,7 @@ REPO="datagutt/moblink-rust"
 
 # Parse command line arguments
 VERSION=""
-while [[ $# -gt 0 ]]; do
+while [ $# -gt 0 ]; do
 	case $1 in
 	-v | --version)
 		VERSION="$2"
