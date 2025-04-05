@@ -52,6 +52,7 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+        if: matrix.job.target != 'mips-unknown-linux-musl'
         with:
           targets: ${{ matrix.job.target }}
 
