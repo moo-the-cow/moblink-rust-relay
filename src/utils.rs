@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use log::{error, info, warn};
-use network_interface::{Addr, NetworkInterface};
+use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use rand::distr::{Alphanumeric, SampleString};
 use tokio::net::lookup_host;
 use tokio::process::Command;
@@ -61,4 +61,20 @@ pub fn get_first_ipv4_address(interface: &NetworkInterface) -> Option<Ipv4Addr> 
         }
     }
     None
+}
+
+pub fn is_this_machines_address(address: &Ipv4Addr) -> bool {
+    let Ok(interfaces) = NetworkInterface::show() else {
+        return true;
+    };
+    for interface in interfaces {
+        for addr in interface.addr {
+            if let Addr::V4(addr) = addr {
+                if &addr.ip == address {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
