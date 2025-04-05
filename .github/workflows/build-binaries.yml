@@ -49,12 +49,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         if: matrix.job.target == 'mips-unknown-linux-musl'
+        with:
+          components: rust-src cargo
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         if: matrix.job.target != 'mips-unknown-linux-musl'
         with:
           targets: ${{ matrix.job.target }}
+          components: rust-src cargo
 
       - name: Install cross
         if: matrix.job.use-cross
