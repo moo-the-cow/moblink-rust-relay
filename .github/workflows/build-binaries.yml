@@ -1,0 +1,133 @@
+name: Build Release Binaries
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    name: ${{ matrix.job.target }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        job:
+          - { target: x86_64-unknown-linux-gnu, use-cross: true }
+          - { target: aarch64-unknown-linux-gnu, use-cross: true }
+          - { target: mips-unknown-linux-musl, use-cross: true }
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for changelog
+
+      - name: Get changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 ${{ github.ref_name }}^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            # If no previous tag, get all commits since the beginning
+            CHANGELOG=$(git log --pretty=format:"- %s" ${{ github.ref_name }})
+          else
+            # Get commits between previous tag and current tag
+            CHANGELOG=$(git log --pretty=format:"- %s" $PREV_TAG..${{ github.ref_name }})
+          fi
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Install prerequisites
+        shell: bash
+        run: |
+          case ${{ matrix.job.target }} in
+            aarch64-unknown-linux-gnu) sudo apt-get -y update ; sudo apt-get -y install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu ;;
+            mips-unknown-linux-musl) sudo apt-get -y update ; sudo apt-get -y install gcc-mips-linux-gnu binutils-mips-linux-gnu musl-tools ;;
+          esac
+
+      - name: Install Rust toolchain (MIPS)
+        uses: dtolnay/rust-toolchain@nightly
+        if: matrix.job.target == 'mips-unknown-linux-musl'
+        with:
+          toolchain: nightly-2025-04-05
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        if: matrix.job.target != 'mips-unknown-linux-musl'
+        with:
+          targets: ${{ matrix.job.target }}
+          toolchain: nightly-2025-04-05
+
+      - name: Install rust-src component
+        run: rustup component add rust-src --toolchain nightly-2025-04-05
+
+      - name: Install cross
+        if: matrix.job.use-cross
+        run: cargo +nightly-2025-04-05 install cross --git https://github.com/cross-rs/cross --rev c7dee4d008475ce1c140773cbcd6078f4b86c2aa --locked
+
+      - name: Overwrite build command env variable
+        if: matrix.job.use-cross
+        shell: bash
+        run: echo "BUILD_CMD=cross" >> $GITHUB_ENV
+
+      - name: Build
+        shell: bash
+        run: $BUILD_CMD +nightly-2025-04-05 build --release --target=${{ matrix.job.target }} -Z build-std=std,panic_abort,core,alloc,proc_macro
+
+      - name: Strip binaries
+        shell: bash
+        run: |
+          case ${{ matrix.job.target }} in
+            x86_64-unknown-linux-gnu)
+              strip target/${{ matrix.job.target }}/release/moblink-relay
+              strip target/${{ matrix.job.target }}/release/moblink-relay-service
+              strip target/${{ matrix.job.target }}/release/moblink-streamer
+              ;;
+            aarch64-unknown-linux-gnu)
+              aarch64-linux-gnu-strip target/${{ matrix.job.target }}/release/moblink-relay
+              aarch64-linux-gnu-strip target/${{ matrix.job.target }}/release/moblink-relay-service
+              aarch64-linux-gnu-strip target/${{ matrix.job.target }}/release/moblink-streamer
+              ;;
+            mips-unknown-linux-musl)
+              # cross handles the toolchain, use the default strip within the container
+              strip target/${{ matrix.job.target }}/release/moblink-relay
+              strip target/${{ matrix.job.target }}/release/moblink-relay-service
+              strip target/${{ matrix.job.target }}/release/moblink-streamer
+              ;;
+          esac
+
+      - name: Rename binaries
+        shell: bash
+        run: |
+          mv target/${{ matrix.job.target }}/release/moblink-relay target/${{ matrix.job.target }}/release/moblink-relay-${{ matrix.job.target }}
+          mv target/${{ matrix.job.target }}/release/moblink-relay-service target/${{ matrix.job.target }}/release/moblink-relay-service-${{ matrix.job.target }}
+          mv target/${{ matrix.job.target }}/release/moblink-streamer target/${{ matrix.job.target }}/release/moblink-streamer-${{ matrix.job.target }}
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: |
+            target/${{ matrix.job.target }}/release/moblink-relay-${{ matrix.job.target }}
+            target/${{ matrix.job.target }}/release/moblink-relay-service-${{ matrix.job.target }}
+            target/${{ matrix.job.target }}/release/moblink-streamer-${{ matrix.job.target }}
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            # Release ${{ github.ref_name }}
+
+            ## Binaries included:
+            - moblink-relay
+            - moblink-relay-service
+            - moblink-streamer
+
+            ## Architectures:
+            - x86_64 (GNU)
+            - ARM64 (GNU)
+            - MIPS (MUSL)
+
+            ## Changelog
+            ${{ steps.changelog.outputs.CHANGELOG }}

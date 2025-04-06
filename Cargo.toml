@@ -1,6 +1,6 @@
 [package]
 name = "moblink-rust"
-version = "0.7.0"
+version = "0.8.4"
 edition = "2024"
 description = "Use spare devices as extra SRTLA bonding connections"
 license = "MIT"
@@ -39,7 +39,7 @@ env_logger = "0.11"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 pnet = "0.35.0"
 socket2 = "0.5.8"
-mdns-sd = "0.13.1"
+mdns-sd = "0.13.5"
 rand = "0.9.0"
 tun = { version = "0.7.17", features = ["async"] }
 packet = "0.1.4"
@@ -47,6 +47,8 @@ tokio-util = "0.7.14"
 ipnetwork = "0.21.1"
 gethostname = "1.0.1"
 network-interface = "2.0.1"
+notify = "8.0.0"
+regex = "1.11.1"
 # Add these exact dependency specifications:
 libc = "=0.2.169"
 getrandom = "=0.3.1" 

@@ -1,15 +1,68 @@
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use log::info;
+use log::{error, info};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
-use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
+use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use crate::MDNS_SERVICE_TYPE;
 use crate::relay::{GetStatusClosure, Relay, Status};
+use crate::utils::{get_first_ipv4_address, is_this_machines_address};
+
+#[derive(Serialize, Deserialize, Default)]
+struct DatabaseContent {
+    relay_ids: HashMap<String, Uuid>,
+}
+
+struct Database {
+    path: PathBuf,
+    content: DatabaseContent,
+}
+
+impl Database {
+    async fn new(path: PathBuf) -> Self {
+        let content = Self::load(&path).await;
+        Self { path, content }
+    }
+
+    async fn load(path: &PathBuf) -> DatabaseContent {
+        let mut content = "".to_string();
+        if let Ok(mut file) = File::open(path).await {
+            let mut buffer = vec![];
+            if file.read_to_end(&mut buffer).await.is_ok() {
+                content = String::from_utf8(buffer).unwrap_or_default();
+            }
+        }
+        serde_json::from_str(&content).unwrap_or_default()
+    }
+
+    async fn store(&self) {
+        let content = serde_json::to_string(&self.content).unwrap_or_default();
+        if let Ok(mut file) = File::create(&self.path).await {
+            file.write_all(content.as_bytes()).await.ok();
+        }
+    }
+
+    async fn get_relay_id(&mut self, name: &str) -> Uuid {
+        if !self.content.relay_ids.contains_key(name) {
+            self.content
+                .relay_ids
+                .insert(name.to_string(), Uuid::new_v4());
+            self.store().await;
+        }
+        *self.content.relay_ids.get(name).unwrap()
+    }
+}
 
 struct ServiceRelay {
     interface_name: String,
@@ -27,13 +80,14 @@ impl ServiceRelay {
         streamer_url: String,
         password: String,
         get_status: Option<GetStatusClosure>,
+        database: Arc<Mutex<Database>>,
     ) -> Self {
         let relay = Relay::new();
         relay
             .setup(
                 streamer_url.clone(),
                 password,
-                uuid::Uuid::new_v4(),
+                database.lock().await.get_relay_id(&interface_name).await,
                 interface_name.clone(),
                 |_| {},
                 get_status,
@@ -55,11 +109,46 @@ struct Streamer {
     url: String,
 }
 
+struct NetworkInterfaceFilter {
+    patterns_to_allow: Option<Regex>,
+    patterns_to_ignore: Option<Regex>,
+}
+
+impl NetworkInterfaceFilter {
+    fn new(patterns_to_allow: Vec<String>, patterns_to_ignore: Vec<String>) -> Self {
+        Self {
+            patterns_to_allow: Self::compile(patterns_to_allow),
+            patterns_to_ignore: Self::compile(patterns_to_ignore),
+        }
+    }
+
+    fn filter(&self, interfaces: &mut Vec<NetworkInterface>) {
+        if let Some(patterns_to_allow) = &self.patterns_to_allow {
+            interfaces.retain(|interface| patterns_to_allow.is_match(&interface.name));
+        }
+        if let Some(patterns_to_ignore) = &self.patterns_to_ignore {
+            interfaces.retain(|interface| !patterns_to_ignore.is_match(&interface.name));
+        }
+    }
+
+    fn compile(patterns: Vec<String>) -> Option<Regex> {
+        if !patterns.is_empty() {
+            let pattern = format!("^{}$", patterns.join("|"));
+            match Regex::new(&pattern) {
+                Ok(regex) => return Some(regex),
+                Err(error) => {
+                    error!("Failed to compile regex {} with error: {}", pattern, error);
+                }
+            }
+        }
+        None
+    }
+}
+
 struct RelayServiceInner {
     me: Weak<Mutex<Self>>,
     password: String,
-    network_interfaces_to_allow: Vec<String>,
-    network_interfaces_to_ignore: Vec<String>,
+    network_interface_filter: NetworkInterfaceFilter,
     get_status: Option<GetStatusClosure>,
     status: Status,
     relays: Vec<ServiceRelay>,
@@ -68,21 +157,26 @@ struct RelayServiceInner {
     network_interface_monitor: Option<JoinHandle<()>>,
     streamers_monitor: Option<JoinHandle<()>>,
     get_status_updater: Option<JoinHandle<()>>,
+    database: Arc<Mutex<Database>>,
 }
 
 impl RelayServiceInner {
-    fn new(
+    async fn new(
         password: String,
         network_interfaces_to_allow: Vec<String>,
         network_interfaces_to_ignore: Vec<String>,
         get_status: Option<GetStatusClosure>,
+        database: PathBuf,
     ) -> Arc<Mutex<Self>> {
+        let database = Arc::new(Mutex::new(Database::new(database).await));
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
                 me: me.clone(),
                 password,
-                network_interfaces_to_allow,
-                network_interfaces_to_ignore,
+                network_interface_filter: NetworkInterfaceFilter::new(
+                    network_interfaces_to_allow,
+                    network_interfaces_to_ignore,
+                ),
                 get_status,
                 status: Default::default(),
                 relays: Vec::new(),
@@ -91,6 +185,7 @@ impl RelayServiceInner {
                 network_interface_monitor: None,
                 streamers_monitor: None,
                 get_status_updater: None,
+                database,
             })
         })
     }
@@ -133,11 +228,7 @@ impl RelayServiceInner {
     }
 
     fn update_network_interfaces(&mut self, mut interfaces: Vec<NetworkInterface>) {
-        if !self.network_interfaces_to_allow.is_empty() {
-            interfaces
-                .retain(|interface| self.network_interfaces_to_allow.contains(&interface.name));
-        }
-        interfaces.retain(|interface| !self.network_interfaces_to_ignore.contains(&interface.name));
+        self.network_interface_filter.filter(&mut interfaces);
         self.network_interfaces = interfaces;
     }
 
@@ -165,6 +256,9 @@ impl RelayServiceInner {
                         let Some(address) = info.get_addresses_v4().iter().next().cloned() else {
                             continue;
                         };
+                        if is_this_machines_address(address) {
+                            continue;
+                        }
                         let Some(relay_service) = relay_service.upgrade() else {
                             break;
                         };
@@ -241,6 +335,7 @@ impl RelayServiceInner {
                         streamer.url.clone(),
                         self.password.clone(),
                         self.create_get_status_closure(),
+                        self.database.clone(),
                     )
                     .await,
                 );
@@ -302,25 +397,17 @@ impl RelayServiceInner {
     }
 }
 
-fn get_first_ipv4_address(interface: &NetworkInterface) -> Option<Ipv4Addr> {
-    for address in &interface.addr {
-        if let Addr::V4(address) = address {
-            return Some(address.ip);
-        }
-    }
-    None
-}
-
 pub struct RelayService {
     inner: Arc<Mutex<RelayServiceInner>>,
 }
 
 impl RelayService {
-    pub fn new(
+    pub async fn new(
         password: String,
         network_interfaces_to_allow: Vec<String>,
         network_interfaces_to_ignore: Vec<String>,
         get_status: Option<GetStatusClosure>,
+        database: PathBuf,
     ) -> Self {
         Self {
             inner: RelayServiceInner::new(
@@ -328,7 +415,9 @@ impl RelayService {
                 network_interfaces_to_allow,
                 network_interfaces_to_ignore,
                 get_status,
-            ),
+                database,
+            )
+            .await,
         }
     }
 

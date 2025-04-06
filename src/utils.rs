@@ -1,5 +1,10 @@
+use std::net::Ipv4Addr;
+use std::time::Duration;
+
 use log::{error, info, warn};
+use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use rand::distr::{Alphanumeric, SampleString};
+use tokio::net::lookup_host;
 use tokio::process::Command;
 
 pub const MDNS_SERVICE_TYPE: &str = "_moblink._tcp.local.";
@@ -28,4 +33,48 @@ pub async fn execute_command(executable: &str, args: &[&str]) {
 
 pub fn format_command(executable: &str, args: &[&str]) -> String {
     format!("{} {}", executable, args.join(" "))
+}
+
+pub async fn resolve_host(address: &str) -> Result<String, AnyError> {
+    for _ in 0..50 {
+        match lookup_host(format!("{}:9999", address)).await {
+            Ok(mut addresses) => {
+                if let Some(address) = addresses.next() {
+                    return Ok(address.ip().to_string());
+                } else {
+                    warn!("No address found for {}", address);
+                }
+            }
+            Err(error) => {
+                warn!("DNS lookup for '{}' failed with error {}", address, error);
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    Err("DNS lookup failed after timeout".into())
+}
+
+pub fn get_first_ipv4_address(interface: &NetworkInterface) -> Option<Ipv4Addr> {
+    for address in &interface.addr {
+        if let Addr::V4(address) = address {
+            return Some(address.ip);
+        }
+    }
+    None
+}
+
+pub fn is_this_machines_address(address: &Ipv4Addr) -> bool {
+    let Ok(interfaces) = NetworkInterface::show() else {
+        return true;
+    };
+    for interface in interfaces {
+        for addr in interface.addr {
+            if let Addr::V4(addr) = addr {
+                if &addr.ip == address {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }

@@ -4,3 +4,4 @@ pub mod relay_service;
 pub mod streamer;
 mod utils;
 pub use utils::MDNS_SERVICE_TYPE;
+mod belaui;

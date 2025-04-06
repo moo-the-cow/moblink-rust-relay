@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -8,7 +9,9 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use ipnetwork::Ipv4Network;
 use log::{debug, error, info};
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
+use notify::event::AccessKind;
+use notify::{self, EventKind, Watcher};
 use packet::{Builder as _, Packet, ip, udp};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::select;
@@ -19,16 +22,18 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
+use tokio_util::sync::CancellationToken;
 use tun::{self, AsyncDevice, TunPacketCodec};
 use uuid::Uuid;
 
-use crate::MDNS_SERVICE_TYPE;
+use crate::belaui::CONFIG_JSON_PATH;
 use crate::protocol::{
     API_VERSION, Authentication, Hello, Identified, Identify, MessageRequest, MessageRequestData,
     MessageResponse, MessageToRelay, MessageToStreamer, MoblinkResult, Present, ResponseData,
     StartTunnelRequest, calculate_authentication,
 };
-use crate::utils::{AnyError, execute_command, random_string};
+use crate::utils::{AnyError, execute_command, random_string, resolve_host};
+use crate::{MDNS_SERVICE_TYPE, belaui};
 
 type WebSocketWriter = SplitSink<WebSocketStream<TcpStream>, Message>;
 type WebSocketReader = SplitStream<WebSocketStream<TcpStream>>;
@@ -87,6 +92,7 @@ struct Relay {
     tun_receiver: Option<JoinHandle<()>>,
     unique_index: u32,
     pong_received: bool,
+    websocket_receiver_cancellation_token: Option<CancellationToken>,
 }
 
 impl Relay {
@@ -114,17 +120,28 @@ impl Relay {
                 tun_receiver: None,
                 unique_index,
                 pong_received: true,
+                websocket_receiver_cancellation_token: None,
             })
         })
     }
 
     fn start(&mut self, reader: WebSocketReader) {
-        self.start_receiver(reader);
+        self.start_websocket_receiver(reader);
         self.start_pinger();
     }
 
-    fn start_receiver(&mut self, mut reader: WebSocketReader) {
+    fn stop(&mut self) {
+        if let Some(websocket_receiver_cancellation_token) =
+            self.websocket_receiver_cancellation_token.take()
+        {
+            websocket_receiver_cancellation_token.cancel();
+        }
+    }
+
+    fn start_websocket_receiver(&mut self, mut reader: WebSocketReader) {
         let relay = self.me.clone();
+        let cancellation_token = CancellationToken::new();
+        self.websocket_receiver_cancellation_token = Some(cancellation_token.clone());
 
         tokio::spawn(async move {
             let Some(relay) = relay.upgrade() else {
@@ -134,32 +151,39 @@ impl Relay {
             relay.lock().await.start_handshake().await;
 
             loop {
-                match tokio::time::timeout(Duration::from_secs(20), reader.next()).await {
-                    Ok(Some(Ok(message))) => {
-                        if let Err(error) =
-                            relay.lock().await.handle_websocket_message(message).await
-                        {
-                            error!("Relay error: {}", error);
-                            break;
+                select! {
+                    result = tokio::time::timeout(Duration::from_secs(20), reader.next()) => {
+                        match result {
+                            Ok(Some(Ok(message))) => {
+                                if let Err(error) =
+                                    relay.lock().await.handle_websocket_message(message).await
+                                {
+                                    error!("Relay error: {}", error);
+                                    break;
+                                }
+                            }
+                            Ok(Some(Err(error))) => {
+                                info!("Websocket error {}", error);
+                                break;
+                            }
+                            Ok(None) => {
+                                info!("No more websocket messages to receive");
+                                break;
+                            }
+                            Err(_) => {
+                                info!("Websocket read timeout");
+                                if relay.lock().await.writer.is_none() {
+                                    break;
+                                }
+                            }
                         }
                     }
-                    Ok(Some(Err(error))) => {
-                        info!("Websocket error {}", error);
+                    _ = cancellation_token.cancelled() => {
+                        info!("Websocket cancelled");
                         break;
-                    }
-                    Ok(None) => {
-                        info!("No more websocket messages to receive");
-                        break;
-                    }
-                    Err(_) => {
-                        info!("Websocket read timeout");
-                        if relay.lock().await.writer.is_none() {
-                            break;
-                        }
                     }
                 }
             }
-
             let streamer = {
                 let mut relay = relay.lock().await;
                 info!("Relay disconnected: {}", relay.relay_address);
@@ -197,6 +221,7 @@ impl Relay {
     }
 
     async fn handle_websocket_message(&mut self, message: Message) -> Result<(), AnyError> {
+        debug!("Websocket got: {:?}", message);
         match message {
             Message::Text(text) => match serde_json::from_str(&text) {
                 Ok(message) => self.handle_message(message).await,
@@ -337,7 +362,7 @@ impl Relay {
 
     #[cfg(not(target_os = "macos"))]
     fn tun_device_name(&self) -> String {
-        format!("moblink-{}", self.relay_name.replace(" ", "-"))
+        format!("mob-{}", self.relay_name.replace(" ", "-"))
     }
 
     #[cfg(target_os = "macos")]
@@ -464,7 +489,6 @@ impl Relay {
         match packet {
             Ok(packet) => match ip::Packet::new(packet) {
                 Ok(ip::Packet::V4(packet)) => {
-                    debug!("TUN receiver: Got IPv4 packet: {:?}", packet);
                     if packet.protocol() == ip::Protocol::Udp
                         && packet.destination() == destination_address
                     {
@@ -499,7 +523,6 @@ impl Relay {
     ) -> Result<(), AnyError> {
         match udp::Packet::new(packet) {
             Ok(packet) => {
-                debug!("TUN receiver: Got UDP packet: {:?}", packet);
                 let new_tun_port = packet.source();
                 if new_tun_port != *tun_port {
                     tun_port_writer.send(new_tun_port).await.ok();
@@ -603,6 +626,11 @@ impl Relay {
             return Err("No streamer".into());
         };
         let streamer = streamer.lock().await;
+        if streamer.destination_address.is_empty() {
+            // TODO: Should not be an error, but start the tunnel when the
+            //       destination address is known (read from BelaUI).
+            return Err("Destination address not available".into());
+        }
         let start_tunnel = StartTunnelRequest {
             address: streamer.destination_address.clone(),
             port: streamer.destination_port,
@@ -633,6 +661,7 @@ impl Relay {
     async fn send_websocket(&mut self, message: Message) -> Result<(), AnyError> {
         match self.writer.as_mut() {
             Some(writer) => {
+                debug!("Websocket sending: {:?}", message);
                 writer.send(message).await?;
             }
             _ => {
@@ -652,9 +681,11 @@ struct StreamerInner {
     password: String,
     destination_address: String,
     destination_port: u16,
+    belabox: bool,
     relays: Vec<Arc<Mutex<Relay>>>,
     unique_indexes: Vec<u32>,
     tun_ip_network: Ipv4Network,
+    service_daemon: ServiceDaemon,
 }
 
 impl StreamerInner {
@@ -667,6 +698,7 @@ impl StreamerInner {
         password: String,
         destination_address: String,
         destination_port: u16,
+        belabox: bool,
     ) -> Result<Arc<Mutex<Self>>, Box<dyn std::error::Error + Send + Sync>> {
         let tun_ip_network = parse_tun_ip_network(&tun_ip_network)?;
         Ok(Arc::new_cyclic(|me| {
@@ -679,25 +711,46 @@ impl StreamerInner {
                 password,
                 destination_address,
                 destination_port,
+                belabox,
                 relays: Vec::new(),
                 unique_indexes: (0..tun_ip_network.size() - 1).collect(),
                 tun_ip_network,
+                service_daemon: Self::create_service_daemon(),
             })
         }))
     }
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.belabox {
+            if let Err(error) = self.read_belaui_config_file().await {
+                error!("Read BELABOX config error: {}", error);
+            }
+            self.start_belaui_config_watcher();
+        } else {
+            self.destination_address = resolve_host(&self.destination_address).await?;
+        }
+        self.start_relay_listener().await?;
+        self.start_mdns_daemon();
+        Ok(())
+    }
+
+    fn create_service_daemon() -> ServiceDaemon {
+        let service_daemon = ServiceDaemon::new().unwrap();
+        service_daemon
+            .disable_interface(Vec::from([IfKind::IPv6]))
+            .ok();
+        service_daemon
+    }
+
+    async fn start_relay_listener(
+        &mut self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener_address = format!("{}:{}", self.address, self.port);
         let listener = TcpListener::bind(&listener_address).await?;
         info!("WebSocket server listening on '{}'", listener_address);
-        let (service_daemon, service_info) = self.create_mdns_service()?;
         let streamer = self.me.clone();
 
         tokio::spawn(async move {
-            if let Err(error) = service_daemon.register(service_info) {
-                error!("Failed to register mDNS service with error: {}", error);
-            }
-
             while let Ok((tcp_stream, relay_address)) = listener.accept().await {
                 match streamer.upgrade() {
                     Some(streamer) => {
@@ -717,26 +770,101 @@ impl StreamerInner {
         Ok(())
     }
 
-    fn create_mdns_service(&self) -> Result<(ServiceDaemon, ServiceInfo), AnyError> {
-        let service_daemon = ServiceDaemon::new()?;
+    fn start_belaui_config_watcher(&mut self) {
+        let (async_events_writer, mut async_events_reader) = tokio::sync::mpsc::channel(1);
+        std::thread::spawn(move || {
+            let (events_writer, events_reader) =
+                std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+            let Ok(mut watcher) = notify::recommended_watcher(events_writer) else {
+                error!("Failed to create watcher");
+                return;
+            };
+            if let Err(error) = watcher.watch(
+                Path::new(CONFIG_JSON_PATH),
+                notify::RecursiveMode::NonRecursive,
+            ) {
+                error!("Watch failed with error: {}", error);
+                return;
+            }
+            for result in events_reader {
+                if async_events_writer.blocking_send(result).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let streamer = self.me.clone();
+        tokio::spawn(async move {
+            while let Some(result) = async_events_reader.recv().await {
+                match result {
+                    Ok(event) => {
+                        let EventKind::Access(AccessKind::Close(_)) = event.kind else {
+                            continue;
+                        };
+                        if let Some(streamer) = streamer.upgrade() {
+                            let mut streamer = streamer.lock().await;
+                            match streamer.read_belaui_config_file().await {
+                                Ok(destination_changed) => {
+                                    if destination_changed {
+                                        for relay in &streamer.relays {
+                                            relay.lock().await.stop();
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    error!("Read BELABOX config error: {}", error)
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => error!("Config error: {:?}", error),
+                }
+            }
+        });
+    }
+
+    fn start_mdns_daemon(&mut self) {
+        match self.create_mdns_service_info() {
+            Ok(service_info) => {
+                if let Err(error) = self.service_daemon.register(service_info) {
+                    error!("Failed to register mDNS service with error: {}", error);
+                }
+            }
+            Err(error) => {
+                error!("Failed to create mDNS service info with error: {}", error);
+            }
+        }
+    }
+
+    async fn read_belaui_config_file(&mut self) -> Result<bool, AnyError> {
+        let config = belaui::Config::new_from_file().await?;
+        let mut destination_changed = false;
+        let address = resolve_host(&config.get_address()).await?;
+        if self.destination_address != address {
+            self.destination_address = address;
+            info!("New destination address {}", self.destination_address);
+            destination_changed = true;
+        }
+        if self.destination_port != config.get_port() {
+            self.destination_port = config.get_port();
+            info!("New destination port {}", self.destination_port);
+            destination_changed = true;
+        }
+        Ok(destination_changed)
+    }
+
+    fn create_mdns_service_info(&self) -> Result<ServiceInfo, AnyError> {
         let properties = HashMap::from([("name".to_string(), self.name.clone())]);
         let service_info = ServiceInfo::new(
             MDNS_SERVICE_TYPE,
             &self.id,
             &format!("{}.local.", self.id),
-            self.make_mdns_address(),
+            "",
             self.port,
             properties,
-        )?;
-        Ok((service_daemon, service_info))
-    }
-
-    fn make_mdns_address(&self) -> String {
-        if self.address == "0.0.0.0" {
-            "".into()
-        } else {
-            self.address.clone()
-        }
+        )?
+        .enable_addr_auto();
+        Ok(service_info)
     }
 
     async fn handle_relay_connection(&mut self, tcp_stream: TcpStream, relay_address: SocketAddr) {
@@ -798,6 +926,7 @@ impl Streamer {
         password: String,
         destination_address: String,
         destination_port: u16,
+        belabox: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
             inner: StreamerInner::new(
@@ -809,6 +938,7 @@ impl Streamer {
                 password,
                 destination_address,
                 destination_port,
+                belabox,
             )?,
         })
     }
