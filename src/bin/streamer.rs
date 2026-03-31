@@ -37,13 +37,17 @@ struct Args {
     #[arg(long, default_value = "10.3.3.0/24")]
     tun_ip_network: String,
 
-    /// Streaming destination address
+    /// Streaming destination address (optional in TUN-only mode)
     #[arg(long)]
     destination_address: Option<String>,
 
-    /// Streaming destination port
+    /// Streaming destination port (optional in TUN-only mode)
     #[arg(long)]
     destination_port: Option<u16>,
+
+    /// TUN-only mode: create TUN interface without forwarding to destination
+    #[arg(long)]
+    tun_only: bool,
 
     /// BELABOX mode
     #[arg(long)]
@@ -78,12 +82,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
     setup_logging(!args.no_log_timestamps, &args.log_level);
 
-    if !args.belabox {
+    // Validate arguments
+    if !args.belabox && !args.tun_only {
         if args.destination_address.is_none() {
-            return Err("--destination-address is required when --belabox is not given.".into());
+            return Err("--destination-address is required when --belabox and --tun-only are not given.".into());
         }
         if args.destination_port.is_none() {
-            return Err("--destination-port is required when --belabox is not given.".into());
+            return Err("--destination-port is required when --belabox and --tun-only are not given.".into());
         }
     }
 
@@ -98,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         args.destination_port.unwrap_or_default(),
         args.belabox,
         args.belabox_config,
+        args.tun_only,
     )?;
     streamer.start().await?;
 
