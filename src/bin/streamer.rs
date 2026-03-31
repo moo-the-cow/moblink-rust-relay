@@ -37,6 +37,10 @@ struct Args {
     #[arg(long, default_value = "10.3.3.0/24")]
     tun_ip_network: String,
 
+    /// TUN interface name (e.g., "mob0", "rist0", etc.)
+    #[arg(long, default_value = "mob0")]
+    tun_name: String,
+
     /// Streaming destination address (optional in TUN-only mode)
     #[arg(long)]
     destination_address: Option<String>,
@@ -104,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         args.belabox,
         args.belabox_config,
         args.tun_only,
+        args.tun_name,
     )?;
     streamer.start().await?;
 
