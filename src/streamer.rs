@@ -90,6 +90,7 @@ struct Relay {
     tun_receiver: Option<JoinHandle<()>>,
     unique_index: u32,
     pong_received: bool,
+    tun_name: String,
 }
 
 impl Relay {
@@ -99,6 +100,7 @@ impl Relay {
         writer: WebSocketWriter,
         tun_ip_address: String,
         unique_index: u32,
+        tun_name: String,
     ) -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
@@ -117,6 +119,7 @@ impl Relay {
                 tun_receiver: None,
                 unique_index,
                 pong_received: true,
+                tun_name,
             })
         })
     }
@@ -329,20 +332,20 @@ impl Relay {
         let mut config = tun::Configuration::default();
         config
             .address(&self.tun_ip_address)
-            .tun_name(self.tun_device_name())
+            .tun_name(&self.tun_name)
             .up();
         let device = tun::create_as_async(&config)?;
         Ok(device.into_framed().split())
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn tun_device_name(&self) -> String {
-        "mob0".to_string()
+    fn get_tun_device_name(&self) -> String {
+        self.tun_name.clone()
     }
 
     #[cfg(target_os = "macos")]
-    fn tun_device_name(&self) -> String {
-        "mob0".to_string()
+    fn get_tun_device_name(&self) -> String {
+        self.tun_name.clone()
     }
 
     async fn setup_os_networking(&self) {
@@ -365,7 +368,7 @@ impl Relay {
                 "add",
                 destination_address,
                 "dev",
-                &self.tun_device_name(),
+                &self.get_tun_device_name(),
                 "proto",
                 "kernel",
                 "scope",
@@ -386,7 +389,7 @@ impl Relay {
                 "via",
                 &self.tun_ip_address,
                 "dev",
-                &self.tun_device_name(),
+                &self.get_tun_device_name(),
                 "table",
                 &table,
             ],
@@ -667,6 +670,7 @@ struct StreamerInner {
     belabox: bool,
     belabox_config: PathBuf,
     tun_only: bool,
+    tun_name: String,
     relays: Vec<Arc<Mutex<Relay>>>,
     unique_indexes: Vec<u32>,
     tun_ip_network: Ipv4Network,
@@ -686,6 +690,7 @@ impl StreamerInner {
         belabox: bool,
         belabox_config: PathBuf,
         tun_only: bool,
+        tun_name: String,
     ) -> Result<Arc<Mutex<Self>>, Box<dyn std::error::Error + Send + Sync>> {
         let tun_ip_network = parse_tun_ip_network(&tun_ip_network)?;
         Ok(Arc::new_cyclic(|me| {
@@ -701,6 +706,7 @@ impl StreamerInner {
                 belabox,
                 belabox_config,
                 tun_only,
+                tun_name,
                 relays: Vec::new(),
                 unique_indexes: (1..tun_ip_network.size() - 1).rev().collect(),
                 tun_ip_network,
@@ -882,6 +888,7 @@ impl StreamerInner {
                     writer,
                     tun_ip_address.to_string(),
                     unique_index,
+                    self.tun_name.clone(),
                 );
                 relay.lock().await.start(reader);
                 self.add_relay(relay);
@@ -926,6 +933,7 @@ impl Streamer {
         belabox: bool,
         belabox_config: PathBuf,
         tun_only: bool,
+        tun_name: String,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
             inner: StreamerInner::new(
@@ -940,6 +948,7 @@ impl Streamer {
                 belabox,
                 belabox_config,
                 tun_only,
+                tun_name,
             )?,
         })
     }
