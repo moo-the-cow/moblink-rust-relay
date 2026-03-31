@@ -238,8 +238,7 @@ impl Relay {
                 result: MoblinkResult::Ok(Present {}),
             };
             self.send(MessageToRelay::Identified(identified)).await?;
-            self.start_tunnel(&streamer.destination_address, streamer.destination_port)
-                .await
+            self.start_tunnel(&streamer.destination_address, streamer.destination_port, streamer.tun_only).await
         } else {
             let identified = Identified {
                 result: MoblinkResult::WrongPassword(Present {}),
@@ -338,17 +337,12 @@ impl Relay {
 
     #[cfg(not(target_os = "macos"))]
     fn tun_device_name(&self) -> String {
-        use libc::IF_NAMESIZE;
-        let name = self
-            .relay_name
-            .replace(|c: char| !c.is_ascii() || c.is_whitespace(), "-");
-        let name = format!("mob{}-{}", self.unique_index, name);
-        name[..name.len().min(IF_NAMESIZE - 1)].to_string()
+        "mob0".to_string()
     }
 
     #[cfg(target_os = "macos")]
     fn tun_device_name(&self) -> String {
-        format!("utun{}", 99 + self.unique_index)
+        "mob0".to_string()
     }
 
     async fn setup_os_networking(&self) {
@@ -606,8 +600,15 @@ impl Relay {
         &mut self,
         destination_address: &str,
         destination_port: u16,
+        tun_only: bool,
     ) -> Result<(), AnyError> {
         if !self.identified {
+            return Ok(());
+        }
+        if tun_only {
+            info!("TUN-only mode: creating tunnel without destination");
+            self.relay_tunnel_port = Some(9999);
+            self.tunnel_created().await?;
             return Ok(());
         }
         if destination_address.is_empty() {
@@ -665,6 +666,7 @@ struct StreamerInner {
     destination_port: u16,
     belabox: bool,
     belabox_config: PathBuf,
+    tun_only: bool,
     relays: Vec<Arc<Mutex<Relay>>>,
     unique_indexes: Vec<u32>,
     tun_ip_network: Ipv4Network,
@@ -683,6 +685,7 @@ impl StreamerInner {
         destination_port: u16,
         belabox: bool,
         belabox_config: PathBuf,
+        tun_only: bool,
     ) -> Result<Arc<Mutex<Self>>, Box<dyn std::error::Error + Send + Sync>> {
         let tun_ip_network = parse_tun_ip_network(&tun_ip_network)?;
         Ok(Arc::new_cyclic(|me| {
@@ -697,6 +700,7 @@ impl StreamerInner {
                 destination_port,
                 belabox,
                 belabox_config,
+                tun_only,
                 relays: Vec::new(),
                 unique_indexes: (1..tun_ip_network.size() - 1).rev().collect(),
                 tun_ip_network,
@@ -711,7 +715,7 @@ impl StreamerInner {
                 error!("Read BELABOX config error: {}", error);
             }
             self.start_belaui_config_watcher();
-        } else {
+        } else if !self.tun_only {
             self.destination_address = resolve_host(&self.destination_address).await?;
         }
         self.start_relay_listener().await?;
@@ -798,6 +802,7 @@ impl StreamerInner {
                                         .start_tunnel(
                                             &streamer.destination_address,
                                             streamer.destination_port,
+                                            streamer.tun_only,
                                         )
                                         .await
                                         .ok();
@@ -920,6 +925,7 @@ impl Streamer {
         destination_port: u16,
         belabox: bool,
         belabox_config: PathBuf,
+        tun_only: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
             inner: StreamerInner::new(
@@ -933,6 +939,7 @@ impl Streamer {
                 destination_port,
                 belabox,
                 belabox_config,
+                tun_only,
             )?,
         })
     }
