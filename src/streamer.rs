@@ -654,6 +654,24 @@ impl Relay {
     }
 }
 
+/// Configuration for a [`Streamer`].
+pub struct StreamerConfig {
+    pub id: String,
+    pub name: String,
+    /// Address the streamer's WebSocket server binds to.
+    pub address: String,
+    /// Port the streamer's WebSocket server binds to.
+    pub port: u16,
+    /// TUN device subnet in CIDR notation (e.g. `10.0.0.0/24`).
+    pub tun_ip_network: String,
+    pub password: String,
+    pub destination_address: String,
+    pub destination_port: u16,
+    /// Run in BELABOX mode, reading destinations from `belabox_config`.
+    pub belabox: bool,
+    pub belabox_config: PathBuf,
+}
+
 struct StreamerInner {
     me: Weak<Mutex<Self>>,
     id: String,
@@ -673,30 +691,21 @@ struct StreamerInner {
 
 impl StreamerInner {
     pub fn new(
-        id: String,
-        name: String,
-        address: String,
-        port: u16,
-        tun_ip_network: String,
-        password: String,
-        destination_address: String,
-        destination_port: u16,
-        belabox: bool,
-        belabox_config: PathBuf,
+        config: StreamerConfig,
     ) -> Result<Arc<Mutex<Self>>, Box<dyn std::error::Error + Send + Sync>> {
-        let tun_ip_network = parse_tun_ip_network(&tun_ip_network)?;
+        let tun_ip_network = parse_tun_ip_network(&config.tun_ip_network)?;
         Ok(Arc::new_cyclic(|me| {
             Mutex::new(Self {
                 me: me.clone(),
-                id,
-                name,
-                address,
-                port,
-                password,
-                destination_address,
-                destination_port,
-                belabox,
-                belabox_config,
+                id: config.id,
+                name: config.name,
+                address: config.address,
+                port: config.port,
+                password: config.password,
+                destination_address: config.destination_address,
+                destination_port: config.destination_port,
+                belabox: config.belabox,
+                belabox_config: config.belabox_config,
                 relays: Vec::new(),
                 unique_indexes: (1..tun_ip_network.size() - 1).rev().collect(),
                 tun_ip_network,
@@ -909,31 +918,9 @@ pub struct Streamer {
 }
 
 impl Streamer {
-    pub fn new(
-        id: String,
-        name: String,
-        address: String,
-        port: u16,
-        tun_ip_network: String,
-        password: String,
-        destination_address: String,
-        destination_port: u16,
-        belabox: bool,
-        belabox_config: PathBuf,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn new(config: StreamerConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
-            inner: StreamerInner::new(
-                id,
-                name,
-                address,
-                port,
-                tun_ip_network,
-                password,
-                destination_address,
-                destination_port,
-                belabox,
-                belabox_config,
-            )?,
+            inner: StreamerInner::new(config)?,
         })
     }
 
