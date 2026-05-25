@@ -352,7 +352,7 @@ impl RelayServiceInner {
                         };
                         {
                             let mut relay_service = relay_service.lock().await;
-                            relay_service.add_streamer(name.to_string(), *address, info.get_port());
+                            relay_service.add_streamer(name.to_string(), address, info.get_port());
                             relay_service.updated().await;
                         }
                     }
