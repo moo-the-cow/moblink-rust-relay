@@ -22,6 +22,22 @@ struct Args {
     #[arg(long)]
     network_interfaces_to_ignore: Vec<String>,
 
+    /// Connect to these streamer URLs directly instead of discovering streamers
+    /// over mDNS. Repeatable, e.g. --streamer-url ws://192.168.1.10:7777
+    #[arg(long)]
+    streamer_url: Vec<String>,
+
+    /// Override the relay name shown in the Moblin app for a given interface,
+    /// as "interface=label". Repeatable, e.g. --interface-name-override
+    /// eth0=WAN
+    #[arg(long)]
+    interface_name_override: Vec<String>,
+
+    /// Write current relay and streamer state as JSON to this file, for
+    /// external UIs to display connection status and streamer IPs.
+    #[arg(long)]
+    runtime_status_file: Option<PathBuf>,
+
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -65,6 +81,9 @@ async fn main() {
         args.password,
         args.network_interfaces_to_allow,
         args.network_interfaces_to_ignore,
+        args.streamer_url,
+        args.interface_name_override,
+        args.runtime_status_file,
         create_get_status_closure(&args.status_executable, &args.status_file),
         args.database,
     )

@@ -13,6 +13,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use url::Url;
 use uuid::Uuid;
 
 use crate::MDNS_SERVICE_TYPE;
@@ -73,9 +74,11 @@ struct ServiceRelay {
 }
 
 impl ServiceRelay {
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         interface_name: String,
         interface_address: Ipv4Addr,
+        relay_name: String,
         streamer_name: String,
         streamer_url: String,
         password: String,
@@ -89,7 +92,7 @@ impl ServiceRelay {
                 streamer_url.clone(),
                 password,
                 database.lock().await.get_relay_id(&interface_name).await,
-                interface_name.clone(),
+                relay_name,
                 |_| {},
                 get_status,
             )
@@ -105,9 +108,82 @@ impl ServiceRelay {
     }
 }
 
+#[derive(Clone)]
 struct Streamer {
     name: String,
     url: String,
+}
+
+#[derive(Serialize)]
+struct RuntimeStreamerStatus {
+    name: String,
+    url: String,
+    host: String,
+}
+
+#[derive(Serialize)]
+struct RuntimeRelayStatus {
+    interface_name: String,
+    interface_address: String,
+    streamer_name: String,
+    streamer_url: String,
+    streamer_host: String,
+}
+
+#[derive(Serialize)]
+struct RuntimeStatus {
+    connected: bool,
+    manual_streamer: bool,
+    streamers: Vec<RuntimeStreamerStatus>,
+    relays: Vec<RuntimeRelayStatus>,
+}
+
+// Parses "interface=label" pairs used to give a relay a friendly name in the
+// Moblin app instead of the raw interface name (e.g. "eth0=WAN").
+fn parse_interface_name_overrides(values: Vec<String>) -> HashMap<String, String> {
+    let mut overrides = HashMap::new();
+
+    for value in values {
+        let Some((interface, label)) = value.split_once('=') else {
+            continue;
+        };
+        let interface = interface.trim();
+        let label = label.trim();
+
+        if !interface.is_empty() && !label.is_empty() {
+            overrides.insert(interface.to_string(), label.to_string());
+        }
+    }
+
+    overrides
+}
+
+fn host_from_url(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|host| host.to_string()))
+        .unwrap_or_default()
+}
+
+// Builds the streamer list from explicit URLs, bypassing mDNS discovery. Used
+// where discovery is unreliable (e.g. across router uplinks behind NAT).
+fn parse_manual_streamers(values: Vec<String>) -> Vec<Streamer> {
+    values
+        .into_iter()
+        .filter_map(|value| match Url::parse(&value) {
+            Ok(url) => Some(Streamer {
+                name: url
+                    .host_str()
+                    .map(|host| host.to_string())
+                    .unwrap_or_else(|| value.clone()),
+                url: value,
+            }),
+            Err(error) => {
+                error!("Invalid manual streamer URL {}: {}", value, error);
+                None
+            }
+        })
+        .collect()
 }
 
 struct NetworkInterfaceFilter {
@@ -150,6 +226,9 @@ struct RelayServiceInner {
     me: Weak<Mutex<Self>>,
     password: String,
     network_interface_filter: NetworkInterfaceFilter,
+    manual_streamers: Vec<Streamer>,
+    interface_name_overrides: HashMap<String, String>,
+    runtime_status_file: Option<PathBuf>,
     get_status: Option<GetStatusClosure>,
     status: Status,
     relays: Vec<ServiceRelay>,
@@ -162,10 +241,14 @@ struct RelayServiceInner {
 }
 
 impl RelayServiceInner {
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         password: String,
         network_interfaces_to_allow: Vec<String>,
         network_interfaces_to_ignore: Vec<String>,
+        streamer_urls: Vec<String>,
+        interface_name_overrides: Vec<String>,
+        runtime_status_file: Option<PathBuf>,
         get_status: Option<GetStatusClosure>,
         database: PathBuf,
     ) -> Arc<Mutex<Self>> {
@@ -178,6 +261,9 @@ impl RelayServiceInner {
                     network_interfaces_to_allow,
                     network_interfaces_to_ignore,
                 ),
+                manual_streamers: parse_manual_streamers(streamer_urls),
+                interface_name_overrides: parse_interface_name_overrides(interface_name_overrides),
+                runtime_status_file,
                 get_status,
                 status: Default::default(),
                 relays: Vec::new(),
@@ -193,8 +279,18 @@ impl RelayServiceInner {
 
     async fn start(&mut self) {
         self.start_network_interfaces_monitor();
-        self.start_streamers_monitor();
+        if self.manual_streamers.is_empty() {
+            self.start_streamers_monitor();
+        } else {
+            self.streamers = self.manual_streamers.clone();
+            self.updated().await;
+            info!(
+                "Using {} manually configured streamer URL(s)",
+                self.streamers.len()
+            );
+        }
         self.start_get_status_updater();
+        self.write_runtime_status().await;
     }
 
     async fn stop(&mut self) {
@@ -302,6 +398,47 @@ impl RelayServiceInner {
         self.streamers.push(Streamer { name, url });
     }
 
+    // Writes the current relay/streamer state to a JSON file so external UIs
+    // (e.g. the OpenWrt LuCI app) can show connection state and streamer IPs.
+    async fn write_runtime_status(&self) {
+        let Some(path) = &self.runtime_status_file else {
+            return;
+        };
+
+        let status = RuntimeStatus {
+            connected: !self.relays.is_empty(),
+            manual_streamer: !self.manual_streamers.is_empty(),
+            streamers: self
+                .streamers
+                .iter()
+                .map(|streamer| RuntimeStreamerStatus {
+                    name: streamer.name.clone(),
+                    url: streamer.url.clone(),
+                    host: host_from_url(&streamer.url),
+                })
+                .collect(),
+            relays: self
+                .relays
+                .iter()
+                .map(|relay| RuntimeRelayStatus {
+                    interface_name: relay.interface_name.clone(),
+                    interface_address: relay.interface_address.to_string(),
+                    streamer_name: relay.streamer_name.clone(),
+                    streamer_url: relay.streamer_url.clone(),
+                    streamer_host: host_from_url(&relay.streamer_url),
+                })
+                .collect(),
+        };
+
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.ok();
+        }
+
+        if let Ok(content) = serde_json::to_string(&status) {
+            tokio::fs::write(path, content).await.ok();
+        }
+    }
+
     async fn updated(&mut self) {
         let old_number_of_relays = self.relays.len();
         self.add_relays().await;
@@ -310,6 +447,7 @@ impl RelayServiceInner {
         if new_number_of_relays != old_number_of_relays {
             info!("Number of relays: {}", new_number_of_relays);
         }
+        self.write_runtime_status().await;
     }
 
     async fn add_relays(&mut self) {
@@ -324,15 +462,21 @@ impl RelayServiceInner {
                 if self.relay_already_added(interface_address, &streamer.url) {
                     continue;
                 }
+                let relay_name = self
+                    .interface_name_overrides
+                    .get(&interface.name)
+                    .cloned()
+                    .unwrap_or_else(|| interface.name.clone());
                 info!(
                     "Adding relay called {} with interface address {} for streamer name {} and \
                      URL {}",
-                    interface.name, interface_address, streamer.name, streamer.url
+                    relay_name, interface_address, streamer.name, streamer.url
                 );
                 self.relays.push(
                     ServiceRelay::new(
                         interface.name.clone(),
                         interface_address,
+                        relay_name,
                         streamer.name.clone(),
                         streamer.url.clone(),
                         self.password.clone(),
@@ -404,10 +548,14 @@ pub struct RelayService {
 }
 
 impl RelayService {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         password: String,
         network_interfaces_to_allow: Vec<String>,
         network_interfaces_to_ignore: Vec<String>,
+        streamer_urls: Vec<String>,
+        interface_name_overrides: Vec<String>,
+        runtime_status_file: Option<PathBuf>,
         get_status: Option<GetStatusClosure>,
         database: PathBuf,
     ) -> Self {
@@ -416,6 +564,9 @@ impl RelayService {
                 password,
                 network_interfaces_to_allow,
                 network_interfaces_to_ignore,
+                streamer_urls,
+                interface_name_overrides,
+                runtime_status_file,
                 get_status,
                 database,
             )
