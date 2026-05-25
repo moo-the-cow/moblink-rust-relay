@@ -130,6 +130,7 @@ async fn run_automatic(args: Args, relay_id: Uuid) {
 
                     let port = info.get_port();
                     for ip in info.get_addresses() {
+                        let ip = ip.to_ip_addr();
                         if ip.is_loopback() || ip.is_multicast() {
                             continue;
                         }

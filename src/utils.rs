@@ -64,7 +64,7 @@ pub fn get_first_ipv4_address(interface: &NetworkInterface) -> Option<Ipv4Addr> 
     None
 }
 
-pub fn any_address_belongs_to_this_machine(addresses: &HashSet<&Ipv4Addr>) -> bool {
+pub fn any_address_belongs_to_this_machine(addresses: &HashSet<Ipv4Addr>) -> bool {
     let Ok(interfaces) = NetworkInterface::show() else {
         return true;
     };

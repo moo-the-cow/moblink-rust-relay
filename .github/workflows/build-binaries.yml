@@ -53,27 +53,27 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         if: matrix.job.target == 'mips-unknown-linux-musl'
         with:
-          toolchain: nightly-2025-04-05
+          toolchain: nightly-2026-05-25
 
       - name: Install Rust toolchain (MUSL)
         uses: dtolnay/rust-toolchain@nightly
         if: contains(matrix.job.target, 'musl')
         with:
-          toolchain: nightly-2025-04-05
+          toolchain: nightly-2026-05-25
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         if: ${{ !contains(matrix.job.target, 'musl') }}
         with:
           targets: ${{ matrix.job.target }}
-          toolchain: nightly-2025-04-05
+          toolchain: nightly-2026-05-25
 
       - name: Install rust-src component
-        run: rustup component add rust-src --toolchain nightly-2025-04-05
+        run: rustup component add rust-src --toolchain nightly-2026-05-25
 
       - name: Install cross
         if: matrix.job.use-cross
-        run: cargo +nightly-2025-04-05 install cross --git https://github.com/cross-rs/cross --rev c7dee4d008475ce1c140773cbcd6078f4b86c2aa --locked
+        run: cargo +nightly-2026-05-25 install cross --git https://github.com/cross-rs/cross --rev c7dee4d008475ce1c140773cbcd6078f4b86c2aa --locked
 
       - name: Overwrite build command env variable
         if: matrix.job.use-cross
@@ -82,7 +82,7 @@ jobs:
 
       - name: Build
         shell: bash
-        run: $BUILD_CMD +nightly-2025-04-05 build --release --target=${{ matrix.job.target }} -Z build-std=std,panic_abort,core,alloc,proc_macro
+        run: $BUILD_CMD +nightly-2026-05-25 build --release --target=${{ matrix.job.target }} -Z build-std=std,panic_abort,core,alloc,proc_macro
 
       - name: Strip binaries
         shell: bash
