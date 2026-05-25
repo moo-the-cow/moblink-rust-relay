@@ -87,18 +87,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    let streamer = streamer::Streamer::new(
-        args.id,
-        args.name,
-        args.websocket_server_address,
-        args.websocket_server_port,
-        args.tun_ip_network,
-        args.password,
-        args.destination_address.unwrap_or_default(),
-        args.destination_port.unwrap_or_default(),
-        args.belabox,
-        args.belabox_config,
-    )?;
+    let streamer = streamer::Streamer::new(streamer::StreamerConfig {
+        id: args.id,
+        name: args.name,
+        address: args.websocket_server_address,
+        port: args.websocket_server_port,
+        tun_ip_network: args.tun_ip_network,
+        password: args.password,
+        destination_address: args.destination_address.unwrap_or_default(),
+        destination_port: args.destination_port.unwrap_or_default(),
+        belabox: args.belabox,
+        belabox_config: args.belabox_config,
+    })?;
     streamer.start().await?;
 
     loop {

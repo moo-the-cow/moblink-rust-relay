@@ -74,13 +74,11 @@ struct ServiceRelay {
 }
 
 impl ServiceRelay {
-    #[allow(clippy::too_many_arguments)]
     async fn new(
         interface_name: String,
         interface_address: Ipv4Addr,
         relay_name: String,
-        streamer_name: String,
-        streamer_url: String,
+        streamer: Streamer,
         password: String,
         get_status: Option<GetStatusClosure>,
         database: Arc<Mutex<Database>>,
@@ -89,7 +87,7 @@ impl ServiceRelay {
         relay.set_bind_address(interface_address.to_string()).await;
         relay
             .setup(
-                streamer_url.clone(),
+                streamer.url.clone(),
                 password,
                 database.lock().await.get_relay_id(&interface_name).await,
                 relay_name,
@@ -101,8 +99,8 @@ impl ServiceRelay {
         Self {
             interface_name,
             interface_address,
-            streamer_name,
-            streamer_url,
+            streamer_name: streamer.name,
+            streamer_url: streamer.url,
             relay,
         }
     }
@@ -241,29 +239,24 @@ struct RelayServiceInner {
 }
 
 impl RelayServiceInner {
-    #[allow(clippy::too_many_arguments)]
     async fn new(
-        password: String,
-        network_interfaces_to_allow: Vec<String>,
-        network_interfaces_to_ignore: Vec<String>,
-        streamer_urls: Vec<String>,
-        interface_name_overrides: Vec<String>,
-        runtime_status_file: Option<PathBuf>,
+        config: RelayServiceConfig,
         get_status: Option<GetStatusClosure>,
-        database: PathBuf,
     ) -> Arc<Mutex<Self>> {
-        let database = Arc::new(Mutex::new(Database::new(database).await));
+        let database = Arc::new(Mutex::new(Database::new(config.database).await));
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
                 me: me.clone(),
-                password,
+                password: config.password,
                 network_interface_filter: NetworkInterfaceFilter::new(
-                    network_interfaces_to_allow,
-                    network_interfaces_to_ignore,
+                    config.network_interfaces_to_allow,
+                    config.network_interfaces_to_ignore,
                 ),
-                manual_streamers: parse_manual_streamers(streamer_urls),
-                interface_name_overrides: parse_interface_name_overrides(interface_name_overrides),
-                runtime_status_file,
+                manual_streamers: parse_manual_streamers(config.streamer_urls),
+                interface_name_overrides: parse_interface_name_overrides(
+                    config.interface_name_overrides,
+                ),
+                runtime_status_file: config.runtime_status_file,
                 get_status,
                 status: Default::default(),
                 relays: Vec::new(),
@@ -307,10 +300,7 @@ impl RelayServiceInner {
     fn start_network_interfaces_monitor(&mut self) {
         let relay_service = self.me.clone();
         self.network_interface_monitor = Some(tokio::spawn(async move {
-            loop {
-                let Ok(interfaces) = NetworkInterface::show() else {
-                    break;
-                };
+            while let Ok(interfaces) = NetworkInterface::show() {
                 let Some(relay_service) = relay_service.upgrade() else {
                     break;
                 };
@@ -477,8 +467,7 @@ impl RelayServiceInner {
                         interface.name.clone(),
                         interface_address,
                         relay_name,
-                        streamer.name.clone(),
-                        streamer.url.clone(),
+                        streamer.clone(),
                         self.password.clone(),
                         self.create_get_status_closure(),
                         self.database.clone(),
@@ -543,34 +532,32 @@ impl RelayServiceInner {
     }
 }
 
+/// Configuration for a [`RelayService`].
+pub struct RelayServiceConfig {
+    pub password: String,
+    /// Regex of interface names to allow (`^`/`$` anchors added automatically).
+    pub network_interfaces_to_allow: Vec<String>,
+    /// Regex of interface names to ignore (`^`/`$` anchors added
+    /// automatically).
+    pub network_interfaces_to_ignore: Vec<String>,
+    /// Streamer URLs to connect to directly instead of discovering over mDNS.
+    pub streamer_urls: Vec<String>,
+    /// `"interface=label"` pairs renaming a relay as shown in the Moblin app.
+    pub interface_name_overrides: Vec<String>,
+    /// File to write relay/streamer state as JSON for external UIs to read.
+    pub runtime_status_file: Option<PathBuf>,
+    /// File storing the per-interface relay identities.
+    pub database: PathBuf,
+}
+
 pub struct RelayService {
     inner: Arc<Mutex<RelayServiceInner>>,
 }
 
 impl RelayService {
-    #[allow(clippy::too_many_arguments)]
-    pub async fn new(
-        password: String,
-        network_interfaces_to_allow: Vec<String>,
-        network_interfaces_to_ignore: Vec<String>,
-        streamer_urls: Vec<String>,
-        interface_name_overrides: Vec<String>,
-        runtime_status_file: Option<PathBuf>,
-        get_status: Option<GetStatusClosure>,
-        database: PathBuf,
-    ) -> Self {
+    pub async fn new(config: RelayServiceConfig, get_status: Option<GetStatusClosure>) -> Self {
         Self {
-            inner: RelayServiceInner::new(
-                password,
-                network_interfaces_to_allow,
-                network_interfaces_to_ignore,
-                streamer_urls,
-                interface_name_overrides,
-                runtime_status_file,
-                get_status,
-                database,
-            )
-            .await,
+            inner: RelayServiceInner::new(config, get_status).await,
         }
     }
 
