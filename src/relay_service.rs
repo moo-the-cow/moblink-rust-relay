@@ -420,12 +420,28 @@ impl RelayServiceInner {
                 .collect(),
         };
 
+        let Ok(content) = serde_json::to_string(&status) else {
+            return;
+        };
+
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
 
-        if let Ok(content) = serde_json::to_string(&status) {
-            tokio::fs::write(path, content).await.ok();
+        // Write to a sibling temp file and atomically rename it over the target.
+        // Readers polling this file (e.g. the LuCI UI) then always observe either
+        // the previous or the new complete document, never a truncated or
+        // half-written one. Writes here are already serialized by the service
+        // mutex, so the fixed temp name cannot collide with itself.
+        let mut temp_path = path.clone();
+        temp_path.as_mut_os_string().push(".tmp");
+        if let Err(error) = tokio::fs::write(&temp_path, content).await {
+            error!("Failed to write runtime status file: {}", error);
+            return;
+        }
+        if let Err(error) = tokio::fs::rename(&temp_path, path).await {
+            error!("Failed to replace runtime status file: {}", error);
+            tokio::fs::remove_file(&temp_path).await.ok();
         }
     }
 
