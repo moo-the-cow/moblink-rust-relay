@@ -1,6 +1,6 @@
 [package]
 name = "moblink-rust"
-version = "0.9.7"
+version = "1.1.0"
 edition = "2024"
 description = "Use spare devices as extra SRTLA bonding connections"
 license = "MIT"
