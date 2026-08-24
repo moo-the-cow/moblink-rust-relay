@@ -47,6 +47,7 @@ struct RelayInner {
     reconnect_on_tunnel_error: Arc<Mutex<bool>>,
     start_on_reconnect_soon: Arc<Mutex<bool>>,
     relay_to_destination: Option<tokio::task::JoinHandle<Result<(), AnyError>>>,
+    relay_to_streamer: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
 }
 
 impl RelayInner {
@@ -68,6 +69,7 @@ impl RelayInner {
                 reconnect_on_tunnel_error: Arc::new(Mutex::new(false)),
                 start_on_reconnect_soon: Arc::new(Mutex::new(false)),
                 relay_to_destination: None,
+                relay_to_streamer: Arc::new(Mutex::new(None)),
             })
         })
     }
@@ -252,13 +254,25 @@ impl RelayInner {
         }
         self.connected = false;
         self.wrong_password = false;
-        *self.reconnect_on_tunnel_error.lock().await = false;
         *self.start_on_reconnect_soon.lock().await = false;
+        self.stop_tunnel().await;
+        self.update_status();
+    }
+
+    /// The streamer asks for a new tunnel on every reconnect attempt, reusing
+    /// the same websocket. Without tearing the old one down first, its
+    /// tasks stay parked on sockets nobody sends to for the rest of the
+    /// session.
+    async fn stop_tunnel(&mut self) {
+        *self.reconnect_on_tunnel_error.lock().await = false;
         if let Some(relay_to_destination) = self.relay_to_destination.take() {
             relay_to_destination.abort();
             relay_to_destination.await.ok();
         }
-        self.update_status();
+        // Taken after joining above, as that task is what fills the slot in.
+        if let Some(relay_to_streamer) = self.relay_to_streamer.lock().await.take() {
+            relay_to_streamer.abort();
+        }
     }
 
     fn update_status(&self) {
@@ -352,6 +366,8 @@ impl RelayInner {
         request: &MessageRequest,
         start_tunnel: &StartTunnelRequest,
     ) -> Result<(), AnyError> {
+        self.stop_tunnel().await;
+
         // Pick bind addresses from the relay
         let local_bind_addr_for_streamer = parse_socket_addr("0.0.0.0")?;
         let local_bind_addr_for_destination = parse_socket_addr(&self.bind_address)?;
@@ -414,14 +430,15 @@ impl RelayInner {
         destination_socket: Arc<UdpSocket>,
         destination_addr: SocketAddr,
     ) -> tokio::task::JoinHandle<Result<(), AnyError>> {
-        *self.reconnect_on_tunnel_error.lock().await = false;
         let reconnect_on_tunnel_error = Arc::new(Mutex::new(true));
         self.reconnect_on_tunnel_error = reconnect_on_tunnel_error.clone();
+        let relay_to_streamer = Arc::new(Mutex::new(None));
+        self.relay_to_streamer = relay_to_streamer.clone();
         let relay = self.me.clone();
 
         tokio::spawn(async move {
             let streamer_address = Arc::new(Mutex::new(None));
-            let mut relay_to_destination_started = false;
+            let mut relay_to_streamer_started = false;
             let mut buf = [0; 2048];
 
             loop {
@@ -431,15 +448,16 @@ impl RelayInner {
                     .await?;
                 streamer_address.lock().await.replace(remote_addr);
 
-                if !relay_to_destination_started {
-                    start_relay_from_destination_to_streamer(
+                if !relay_to_streamer_started {
+                    let task = start_relay_from_destination_to_streamer(
                         relay.clone(),
                         streamer_socket.clone(),
                         destination_socket.clone(),
                         streamer_address.clone(),
                         reconnect_on_tunnel_error.clone(),
                     );
-                    relay_to_destination_started = true;
+                    relay_to_streamer.lock().await.replace(task);
+                    relay_to_streamer_started = true;
                 }
             }
         })
@@ -537,7 +555,7 @@ fn start_relay_from_destination_to_streamer(
     destination_socket: Arc<UdpSocket>,
     streamer_address: Arc<Mutex<Option<SocketAddr>>>,
     reconnect_on_tunnel_error: Arc<Mutex<bool>>,
-) {
+) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
         loop {
             if let Err(error) = relay_one_packet_from_destination_to_streamer(
@@ -554,12 +572,17 @@ fn start_relay_from_destination_to_streamer(
 
         if *reconnect_on_tunnel_error.lock().await {
             if let Some(relay) = relay.upgrade() {
-                relay.lock().await.reconnect_soon().await;
+                // From another task, as reconnecting tears down the tunnel, which
+                // aborts this one before it would get around to reconnecting.
+                tokio::spawn(async move {
+                    relay.lock().await.reconnect_soon().await;
+                });
             }
         } else {
             info!("Not reconnecting after tunnel error");
         }
-    });
+    })
+    .abort_handle()
 }
 
 async fn relay_one_packet_from_destination_to_streamer(

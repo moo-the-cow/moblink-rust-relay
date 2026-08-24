@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use moblink_rust::relay::create_get_status_closure;
-use moblink_rust::relay_service::RelayService;
+use moblink_rust::relay_service::{RelayService, RelayServiceConfig};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -21,6 +21,22 @@ struct Args {
     /// automatically). Ignores localhost automatically.
     #[arg(long)]
     network_interfaces_to_ignore: Vec<String>,
+
+    /// Connect to these streamer URLs directly instead of discovering streamers
+    /// over mDNS. Repeatable, e.g. --streamer-url ws://192.168.1.10:7777
+    #[arg(long)]
+    streamer_url: Vec<String>,
+
+    /// Override the relay name shown in the Moblin app for a given interface,
+    /// as "interface=label". Repeatable, e.g. --interface-name-override
+    /// eth0=WAN
+    #[arg(long)]
+    interface_name_override: Vec<String>,
+
+    /// Write current relay and streamer state as JSON to this file, for
+    /// external UIs to display connection status and streamer IPs.
+    #[arg(long)]
+    runtime_status_file: Option<PathBuf>,
 
     /// Log level
     #[arg(long, default_value = "info")]
@@ -62,11 +78,16 @@ async fn main() {
     setup_logging(!args.no_log_timestamps, &args.log_level);
 
     let relay_service = RelayService::new(
-        args.password,
-        args.network_interfaces_to_allow,
-        args.network_interfaces_to_ignore,
+        RelayServiceConfig {
+            password: args.password,
+            network_interfaces_to_allow: args.network_interfaces_to_allow,
+            network_interfaces_to_ignore: args.network_interfaces_to_ignore,
+            streamer_urls: args.streamer_url,
+            interface_name_overrides: args.interface_name_override,
+            runtime_status_file: args.runtime_status_file,
+            database: args.database,
+        },
         create_get_status_closure(&args.status_executable, &args.status_file),
-        args.database,
     )
     .await;
     relay_service.start().await;

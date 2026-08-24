@@ -13,8 +13,9 @@ jobs:
     strategy:
       matrix:
         job:
-          - { target: x86_64-unknown-linux-gnu, use-cross: true }
-          - { target: aarch64-unknown-linux-gnu, use-cross: true }
+          # Only statically linked MUSL binaries are published - GNU builds pick up the
+          # glibc of the build image and fail on older distros such as Ubuntu 22.04.
+          - { target: x86_64-unknown-linux-musl, use-cross: true }
           - { target: aarch64-unknown-linux-musl, use-cross: true }
           - { target: mips-unknown-linux-musl, use-cross: true }
       fail-fast: false
@@ -44,36 +45,22 @@ jobs:
         shell: bash
         run: |
           case ${{ matrix.job.target }} in
-            aarch64-unknown-linux-gnu) sudo apt-get -y update ; sudo apt-get -y install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu ;;
+            x86_64-unknown-linux-musl) sudo apt-get -y update ; sudo apt-get -y install musl-tools ;;
             aarch64-unknown-linux-musl) sudo apt-get -y update ; sudo apt-get -y install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu musl-tools ;;
             mips-unknown-linux-musl) sudo apt-get -y update ; sudo apt-get -y install gcc-mips-linux-gnu binutils-mips-linux-gnu musl-tools ;;
           esac
 
-      - name: Install Rust toolchain (MIPS)
-        uses: dtolnay/rust-toolchain@nightly
-        if: matrix.job.target == 'mips-unknown-linux-musl'
-        with:
-          toolchain: nightly-2025-04-05
-
-      - name: Install Rust toolchain (MUSL)
-        uses: dtolnay/rust-toolchain@nightly
-        if: contains(matrix.job.target, 'musl')
-        with:
-          toolchain: nightly-2025-04-05
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
-        if: ${{ !contains(matrix.job.target, 'musl') }}
         with:
-          targets: ${{ matrix.job.target }}
-          toolchain: nightly-2025-04-05
+          toolchain: nightly-2026-05-25
 
       - name: Install rust-src component
-        run: rustup component add rust-src --toolchain nightly-2025-04-05
+        run: rustup component add rust-src --toolchain nightly-2026-05-25
 
       - name: Install cross
         if: matrix.job.use-cross
-        run: cargo +nightly-2025-04-05 install cross --git https://github.com/cross-rs/cross --rev c7dee4d008475ce1c140773cbcd6078f4b86c2aa --locked
+        run: cargo +nightly-2026-05-25 install cross --git https://github.com/cross-rs/cross --rev c7dee4d008475ce1c140773cbcd6078f4b86c2aa --locked
 
       - name: Overwrite build command env variable
         if: matrix.job.use-cross
@@ -82,18 +69,18 @@ jobs:
 
       - name: Build
         shell: bash
-        run: $BUILD_CMD +nightly-2025-04-05 build --release --target=${{ matrix.job.target }} -Z build-std=std,panic_abort,core,alloc,proc_macro
+        run: $BUILD_CMD +nightly-2026-05-25 build --release --target=${{ matrix.job.target }} -Z build-std=std,panic_abort,core,alloc,proc_macro
 
       - name: Strip binaries
         shell: bash
         run: |
           case ${{ matrix.job.target }} in
-            x86_64-unknown-linux-gnu)
+            x86_64-unknown-linux-musl)
               strip target/${{ matrix.job.target }}/release/moblink-relay
               strip target/${{ matrix.job.target }}/release/moblink-relay-service
               strip target/${{ matrix.job.target }}/release/moblink-streamer
               ;;
-            aarch64-unknown-linux-gnu)
+            aarch64-unknown-linux-musl)
               aarch64-linux-gnu-strip target/${{ matrix.job.target }}/release/moblink-relay
               aarch64-linux-gnu-strip target/${{ matrix.job.target }}/release/moblink-relay-service
               aarch64-linux-gnu-strip target/${{ matrix.job.target }}/release/moblink-streamer
@@ -126,10 +113,9 @@ jobs:
             - moblink-relay-service
             - moblink-streamer
 
-            ## Architectures:
-            - x86_64 (GNU)
-            - ARM64 (GNU) - for newer systems
-            - ARM64 (MUSL) - statically linked, compatible with older systems like Ubuntu 18.04
+            ## Architectures (all statically linked against MUSL, no glibc requirement):
+            - x86_64 (MUSL)
+            - ARM64 (MUSL)
             - MIPS (MUSL)
 
             ## Changelog

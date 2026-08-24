@@ -78,6 +78,37 @@ cargo build --release
 
 Relay status (today only battery percentage) is sent to the streamer if `--status-executable` or `--status-file` is given and outputting a valid JSON object as seen above.
 
+### Run Relay Service
+
+`moblink-relay` connects a single network interface. `moblink-relay-service` is a supervisor that watches every eligible network interface and starts one relay per interface automatically. It is useful on machines with several uplinks (for example a router with Ethernet, Wi-Fi, and cellular), where each uplink becomes an independent bonding path.
+
+```bash
+./target/release/moblink-relay-service \
+  --password "secret123" \
+  --interface-name-override eth0=WAN \
+  --interface-name-override wwan0=LTE \
+  --runtime-status-file /tmp/moblink-relay-status.json
+```
+
+By default the service discovers streamers over multicast DNS. Pass one or more `--streamer-url` to connect to fixed streamers instead, which is helpful where multicast DNS is unreliable (for example across router uplinks behind NAT).
+
+#### Command-Line Arguments
+
+| Argument         | Description                                                                  | Default       | Example                                     |
+|------------------|------------------------------------------------------------------------------|---------------|---------------------------------------------|
+| `--password`     | Password used in the challenge response authentication                       | `1234`        | `--password mySecret`                       |
+| `--network-interfaces-to-allow` | Regex of interface names to allow (`^`/`$` anchors added automatically). Repeatable. Localhost is never allowed. | _All_ | `--network-interfaces-to-allow 'eth.*'` |
+| `--network-interfaces-to-ignore` | Regex of interface names to ignore (`^`/`$` anchors added automatically). Repeatable. | _None_ | `--network-interfaces-to-ignore 'docker.*'` |
+| `--streamer-url` | Connect to this streamer URL directly instead of discovering over multicast DNS. Repeatable. | _None_ (multicast DNS) | `--streamer-url ws://192.168.1.2:7777` |
+| `--interface-name-override` | Rename the relay shown in the Moblin app for a given interface, as `interface=label`. Repeatable. | _None_ | `--interface-name-override eth0=WAN` |
+| `--runtime-status-file` | Write relay and streamer state as JSON to this file, for external UIs to display connection status and streamer IPs. | _None_ | `--runtime-status-file status.json` |
+| `--status-executable` | Status executable. Print status to standard output on format {"batteryPercentage": 93} | _None_ | `--status-executable ./status.sh`   |
+| `--status-file`  | Status file. Contains status on format {"batteryPercentage": 93}             | _None_        | `--status-file status.json`                 |
+| `--database`     | File storing the per-interface relay identities                              | `moblink-relay-service.json` | `--database /etc/moblink/relays.json` |
+| `--log-level`    | Logging verbosity (e.g., error, warn, info, debug, trace)                    | `info`        | `--log-level debug`                         |
+
+The runtime status file is rewritten whenever relays or streamers change. It contains a JSON object with `connected`, `manual_streamer`, a `streamers` array, and a `relays` array (each relay reporting its interface name, interface address, and the streamer name, URL, and host it serves).
+
 ### Run Streamer
 
 ```bash

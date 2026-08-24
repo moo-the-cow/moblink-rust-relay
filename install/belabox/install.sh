@@ -35,46 +35,25 @@ fi
 LATEST_RELEASE_URL="https://github.com/$REPO/releases/download/$LATEST_TAG"
 LATEST_RELEASE_SOURCE_CODE_URL="https://github.com/$REPO/archive/refs/tags/$LATEST_TAG.tar.gz"
 
-# Detect architecture and OS version
+# Detect architecture. Always use the statically linked MUSL binaries so the install
+# never depends on the host glibc version - the GNU binaries are built against a newer
+# glibc than distros like BelaBox' Ubuntu 22.04 provide.
 ARCH=$(uname -m)
 case $ARCH in
 x86_64)
-	TARGET="x86_64-unknown-linux-gnu"
+	TARGET="x86_64-unknown-linux-musl"
+	FALLBACK_TARGET="x86_64-unknown-linux-gnu"
 	;;
 aarch64)
-	# Check if we're on Ubuntu 18.04 or older to use MUSL for better compatibility
-	if command -v lsb_release >/dev/null 2>&1; then
-		DISTRO=$(lsb_release -si)
-		VID=$(lsb_release -sr)
-		if [ "$DISTRO" = "Ubuntu" ] && [ "$(echo "$VID" | cut -d. -f1)" -le 18 ]; then
-			echo "Detected Ubuntu $VID - using statically linked MUSL binary for compatibility"
-			TARGET="aarch64-unknown-linux-musl"
-		else
-			TARGET="aarch64-unknown-linux-gnu"
-		fi
-	else
-		# Check /etc/os-release as fallback
-		if [ -f /etc/os-release ]; then
-			OS_ID=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
-			OS_VERSION_ID=$(grep -E '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
-			if [ "$OS_ID" = "ubuntu" ] && [ "${OS_VERSION_ID%%.*}" -le 18 ]; then
-				echo "Detected Ubuntu $OS_VERSION_ID - using statically linked MUSL binary for compatibility"
-				TARGET="aarch64-unknown-linux-musl"
-			else
-				TARGET="aarch64-unknown-linux-gnu"
-			fi
-		else
-			# Default to MUSL for maximum compatibility when we can't detect the OS
-			echo "Cannot detect OS version - using statically linked MUSL binary for maximum compatibility"
-			TARGET="aarch64-unknown-linux-musl"
-		fi
-	fi
+	TARGET="aarch64-unknown-linux-musl"
+	FALLBACK_TARGET="aarch64-unknown-linux-gnu"
 	;;
 *)
 	echo "Unsupported architecture: $ARCH"
 	exit 1
 	;;
 esac
+echo "Using statically linked MUSL binaries ($TARGET)"
 
 rm -rf $WORKSPACE
 mkdir $WORKSPACE
@@ -84,10 +63,22 @@ echo "- Stopping moblink systemd services (if running)"
 systemctl stop moblink-streamer || true
 systemctl stop moblink-relay-service || true
 
+download_binaries() {
+	target="$1"
+	wget -q --show-progress "$LATEST_RELEASE_URL/moblink-relay-$target" &&
+		wget -q --show-progress "$LATEST_RELEASE_URL/moblink-relay-service-$target" &&
+		wget -q --show-progress "$LATEST_RELEASE_URL/moblink-streamer-$target"
+}
+
 echo "- Downloading moblink binaries"
-wget -q --show-progress "$LATEST_RELEASE_URL/moblink-relay-$TARGET"
-wget -q --show-progress "$LATEST_RELEASE_URL/moblink-relay-service-$TARGET"
-wget -q --show-progress "$LATEST_RELEASE_URL/moblink-streamer-$TARGET"
+# Releases before MUSL was built for every architecture only ship GNU binaries, so fall
+# back to those when the MUSL ones are missing from the requested release.
+if ! download_binaries "$TARGET"; then
+	echo "- $TARGET binaries are not published for $LATEST_TAG - falling back to $FALLBACK_TARGET"
+	rm -f "moblink-relay-$TARGET" "moblink-relay-service-$TARGET" "moblink-streamer-$TARGET"
+	TARGET="$FALLBACK_TARGET"
+	download_binaries "$TARGET"
+fi
 
 echo "- Downloading moblink systemd service files"
 wget -q --show-progress "$LATEST_RELEASE_SOURCE_CODE_URL"

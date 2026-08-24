@@ -64,16 +64,16 @@ pub fn get_first_ipv4_address(interface: &NetworkInterface) -> Option<Ipv4Addr> 
     None
 }
 
-pub fn any_address_belongs_to_this_machine(addresses: &HashSet<&Ipv4Addr>) -> bool {
+pub fn any_address_belongs_to_this_machine(addresses: &HashSet<Ipv4Addr>) -> bool {
     let Ok(interfaces) = NetworkInterface::show() else {
         return true;
     };
     for interface in interfaces {
         for addr in interface.addr {
-            if let Addr::V4(addr) = addr {
-                if addresses.contains(&addr.ip) {
-                    return true;
-                }
+            if let Addr::V4(addr) = addr
+                && addresses.contains(&addr.ip)
+            {
+                return true;
             }
         }
     }
