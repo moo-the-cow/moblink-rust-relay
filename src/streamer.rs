@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -8,10 +7,8 @@ use std::time::Duration;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use ipnetwork::Ipv4Network;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
-use notify::event::AccessKind;
-use notify::{self, EventKind, Watcher};
 use packet::{Builder as _, Packet, ip, udp};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::select;
@@ -19,6 +16,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
@@ -30,8 +28,8 @@ use crate::protocol::{
     MessageResponse, MessageToRelay, MessageToStreamer, MoblinkResult, Present, ResponseData,
     StartTunnelRequest, calculate_authentication,
 };
-use crate::utils::{AnyError, execute_command, random_string, resolve_host};
-use crate::{MDNS_SERVICE_TYPE, belaui};
+use crate::utils::{AnyError, random_string};
+use crate::MDNS_SERVICE_TYPE;
 
 type WebSocketWriter = SplitSink<WebSocketStream<TcpStream>, Message>;
 type WebSocketReader = SplitStream<WebSocketStream<TcpStream>>;
@@ -39,7 +37,7 @@ type WebSocketReader = SplitStream<WebSocketStream<TcpStream>>;
 type TunWriter = SplitSink<Framed<AsyncDevice, TunPacketCodec>, Vec<u8>>;
 type TunReader = SplitStream<Framed<AsyncDevice, TunPacketCodec>>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PacketBuilder {
     source_address: Ipv4Addr,
     source_port: u16,
@@ -86,10 +84,16 @@ struct Relay {
     relay_name: String,
     relay_tunnel_port: Option<u16>,
     tun_ip_address: String,
+    tun_writer: Option<TunWriter>,
+    tun_reader: Option<TunReader>,
     relay_receiver: Option<JoinHandle<()>>,
     tun_receiver: Option<JoinHandle<()>>,
     unique_index: u32,
     pong_received: bool,
+    tun_device_name: String,
+    connected: bool,
+    destination_address: String,
+    destination_port: u16,
 }
 
 impl Relay {
@@ -99,6 +103,8 @@ impl Relay {
         writer: WebSocketWriter,
         tun_ip_address: String,
         unique_index: u32,
+        destination_address: String,
+        destination_port: u16,
     ) -> Arc<Mutex<Self>> {
         Arc::new_cyclic(|me| {
             Mutex::new(Self {
@@ -113,41 +119,52 @@ impl Relay {
                 relay_name: "".into(),
                 relay_tunnel_port: None,
                 tun_ip_address,
+                tun_writer: None,
+                tun_reader: None,
                 relay_receiver: None,
                 tun_receiver: None,
                 unique_index,
                 pong_received: true,
+                tun_device_name: String::new(),
+                connected: false,
+                destination_address,
+                destination_port,
             })
         })
     }
 
     fn start(&mut self, reader: WebSocketReader) {
+        self.connected = true;
         self.start_websocket_receiver(reader);
         self.start_pinger();
     }
 
     fn start_websocket_receiver(&mut self, mut reader: WebSocketReader) {
-        let relay = self.me.clone();
+        let relay_weak = self.me.clone();
 
         tokio::spawn(async move {
-            let Some(relay) = relay.upgrade() else {
+            let Some(relay_arc) = relay_weak.upgrade() else {
                 return;
             };
 
-            relay.lock().await.start_handshake().await;
+            relay_arc.lock().await.start_handshake().await;
 
             loop {
-                match tokio::time::timeout(Duration::from_secs(20), reader.next()).await {
+                if !relay_arc.lock().await.connected {
+                    break;
+                }
+
+                match tokio::time::timeout(Duration::from_secs(60), reader.next()).await {
                     Ok(Some(Ok(message))) => {
                         if let Err(error) =
-                            relay.lock().await.handle_websocket_message(message).await
+                            relay_arc.lock().await.handle_websocket_message(message).await
                         {
                             error!("Relay error: {}", error);
                             break;
                         }
                     }
                     Ok(Some(Err(error))) => {
-                        info!("Websocket error {}", error);
+                        info!("Websocket error: {}", error);
                         break;
                     }
                     Ok(None) => {
@@ -156,37 +173,43 @@ impl Relay {
                     }
                     Err(_) => {
                         info!("Websocket read timeout");
-                        if relay.lock().await.writer.is_none() {
+                        if relay_arc.lock().await.writer.is_none() {
                             break;
                         }
                     }
                 }
             }
-            let streamer = {
-                let mut relay = relay.lock().await;
-                info!("Relay disconnected: {}", relay.relay_address);
-                relay.tunnel_destroyed().await;
-                relay.streamer.upgrade()
-            };
+
+            let mut relay_guard = relay_arc.lock().await;
+            info!("Relay disconnected: {}", relay_guard.relay_address);
+            relay_guard.connected = false;
+            relay_guard.cleanup().await;
+            let streamer = relay_guard.streamer.upgrade();
+            drop(relay_guard);
             if let Some(streamer) = streamer {
-                streamer.lock().await.remove_relay(&relay).await;
+                streamer.lock().await.remove_relay(&relay_arc).await;
             }
         });
     }
 
     fn start_pinger(&mut self) {
-        let relay = self.me.clone();
+        let relay_weak = self.me.clone();
 
         tokio::spawn(async move {
             loop {
                 {
-                    let Some(relay) = relay.upgrade() else {
+                    let relay_arc = relay_weak.upgrade();
+                    if relay_arc.is_none() {
                         break;
-                    };
-                    let mut relay = relay.lock().await;
+                    }
+                    let relay_arc = relay_arc.unwrap();
+                    let mut relay = relay_arc.lock().await;
+                    if !relay.connected {
+                        break;
+                    }
                     if !relay.pong_received {
-                        info!("Pong not received.");
-                        relay.writer = None;
+                        info!("Pong not received, disconnecting");
+                        relay.connected = false;
                         break;
                     } else {
                         relay.pong_received = false;
@@ -198,18 +221,58 @@ impl Relay {
         });
     }
 
+    async fn cleanup(&mut self) {
+        info!("Cleaning up relay: {} (TUN: {})", self.relay_name, self.tun_device_name);
+
+        if let Some(tun_receiver) = self.tun_receiver.take() {
+            tun_receiver.abort();
+            let _ = tun_receiver.await;
+        }
+
+        if let Some(relay_receiver) = self.relay_receiver.take() {
+            relay_receiver.abort();
+            let _ = relay_receiver.await;
+        }
+
+        if let Some(tun_writer) = self.tun_writer.take() {
+            drop(tun_writer);
+        }
+        if let Some(tun_reader) = self.tun_reader.take() {
+            drop(tun_reader);
+        }
+
+        if let Some(mut writer) = self.writer.take() {
+            let _ = writer.close().await;
+        }
+
+        self.identified = false;
+        self.relay_tunnel_port = None;
+        self.pong_received = false;
+
+        info!("Relay cleanup complete: {}", self.relay_name);
+    }
+
     async fn handle_websocket_message(&mut self, message: Message) -> Result<(), AnyError> {
         debug!("Websocket got: {:?}", message);
         match message {
             Message::Text(text) => match serde_json::from_str(&text) {
                 Ok(message) => self.handle_message(message).await,
                 Err(error) => {
+                    warn!("Failed to deserialize message: {}", error);
                     Err(format!("Failed to deserialize message with error: {}", error).into())
                 }
             },
-            Message::Ping(data) => Ok(self.send_websocket(Message::Pong(data)).await?),
+            Message::Ping(data) => {
+                info!("Received ping, sending pong");
+                Ok(self.send_websocket(Message::Pong(data)).await?)
+            }
             Message::Pong(_) => {
                 self.pong_received = true;
+                Ok(())
+            }
+            Message::Close(_) => {
+                info!("Received close message from relay");
+                self.connected = false;
                 Ok(())
             }
             _ => Err(format!("Unsupported websocket message: {:?}", message).into()),
@@ -218,8 +281,14 @@ impl Relay {
 
     async fn handle_message(&mut self, message: MessageToStreamer) -> Result<(), AnyError> {
         match message {
-            MessageToStreamer::Identify(identify) => self.handle_message_identify(identify).await,
-            MessageToStreamer::Response(response) => self.handle_message_response(response).await,
+            MessageToStreamer::Identify(identify) => {
+                info!("Received Identify message from relay");
+                self.handle_message_identify(identify).await
+            }
+            MessageToStreamer::Response(response) => {
+                info!("Received Response message");
+                self.handle_message_response(response).await
+            }
         }
     }
 
@@ -228,19 +297,37 @@ impl Relay {
             return Err("No streamer".into());
         };
         let streamer = streamer.lock().await;
+
+        info!("Relay identifying with ID: {}, Name: {}", identify.id, identify.name);
+
         if identify.authentication
             == calculate_authentication(&streamer.password, &self.salt, &self.challenge)
         {
             self.identified = true;
             self.relay_id = identify.id;
             self.relay_name = identify.name;
+            self.tun_device_name = format!("mob{}-{}", self.unique_index,
+                self.relay_name.replace(|c: char| !c.is_ascii() || c.is_whitespace(), "-"));
+            info!("Relay identified: {} ({})", self.relay_name, self.relay_id);
+
             let identified = Identified {
                 result: MoblinkResult::Ok(Present {}),
             };
+            info!("Sending Identified OK response");
             self.send(MessageToRelay::Identified(identified)).await?;
-            self.start_tunnel(&streamer.destination_address, streamer.destination_port)
-                .await
+
+            info!("Creating TUN device for RIST to use...");
+            self.create_tun_device()?;
+
+            info!("TUN device {} with IP {} is ready for RIST (miface={})",
+                self.tun_device_name, self.tun_ip_address, self.tun_device_name);
+
+            info!("Starting tunnel to {}:{}", self.destination_address, self.destination_port);
+            self.start_tunnel().await?;
+
+            Ok(())
         } else {
+            warn!("Relay sent wrong password");
             let identified = Identified {
                 result: MoblinkResult::WrongPassword(Present {}),
             };
@@ -250,13 +337,23 @@ impl Relay {
     }
 
     async fn handle_message_response(&mut self, response: MessageResponse) -> Result<(), AnyError> {
-        match response.data {
-            ResponseData::StartTunnel(data) => {
-                self.relay_tunnel_port = Some(data.port);
-                self.tunnel_created().await?;
+        info!("Handling response: id={}, result={:?}", response.id, response.result);
+        match response.result {
+            MoblinkResult::Ok(_) => {
+                match response.data {
+                    ResponseData::StartTunnel(data) => {
+                        info!("Received StartTunnel response with port: {}", data.port);
+                        self.relay_tunnel_port = Some(data.port);
+                        self.tunnel_created().await?;
+                    }
+                    _ => {
+                        info!("Ignoring response data: {:?}", response.data);
+                    }
+                }
             }
-            message => {
-                info!("Ignoring message {:?}", message);
+            MoblinkResult::WrongPassword(_) => {
+                error!("Wrong password response from relay");
+                return Err("Wrong password".into());
             }
         }
         Ok(())
@@ -277,43 +374,19 @@ impl Relay {
         Ok(())
     }
 
-    async fn tunnel_destroyed(&mut self) {
-        let Some(relay_tunnel_port) = self.relay_tunnel_port.take() else {
-            return;
-        };
-        info!(
-            "Tunnel destroyed: {}:{} ({}, {})",
-            self.relay_address.ip(),
-            relay_tunnel_port,
-            self.relay_name,
-            self.relay_id
-        );
-        self.stop_udp_networking().await;
-    }
-
     async fn start_udp_networking(&mut self, relay_tunnel_port: u16) -> Result<(), AnyError> {
-        let (tun_writer, tun_reader) = self.create_tun_device()?;
         let relay_socket = self.create_relay_socket(relay_tunnel_port).await?;
-        self.setup_os_networking().await;
         let (tun_port_writer, tun_port_reader) = channel(1);
+
+        let tun_writer = self.tun_writer.take().expect("TUN writer not available");
+        let tun_reader = self.tun_reader.take().expect("TUN reader not available");
+
         self.start_relay_receiver(relay_socket.clone(), tun_writer, tun_port_reader)
             .await?;
-        self.start_tun_receiver(tun_reader, relay_socket, tun_port_writer)
+        self.start_tun_forwarder(tun_reader, relay_socket, tun_port_writer)
             .await;
 
         Ok(())
-    }
-
-    async fn stop_udp_networking(&mut self) {
-        if let Some(relay_receiver) = self.relay_receiver.take() {
-            relay_receiver.abort();
-            relay_receiver.await.ok();
-        }
-        if let Some(tun_receiver) = self.tun_receiver.take() {
-            tun_receiver.abort();
-            tun_receiver.await.ok();
-        }
-        self.teardown_os_networking().await;
     }
 
     async fn create_relay_socket(
@@ -322,202 +395,92 @@ impl Relay {
     ) -> Result<Arc<UdpSocket>, AnyError> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         let tunnel_address = format!("{}:{}", self.relay_address.ip(), relay_tunnel_port);
+        info!("Connecting to relay tunnel at: {}", tunnel_address);
         socket.connect(tunnel_address).await?;
         Ok(Arc::new(socket))
     }
 
-    fn create_tun_device(&self) -> Result<(TunWriter, TunReader), AnyError> {
+    fn create_tun_device(&mut self) -> Result<(), AnyError> {
         let mut config = tun::Configuration::default();
         config
             .address(&self.tun_ip_address)
-            .tun_name(self.tun_device_name())
+            .tun_name(&self.tun_device_name)
             .up();
         let device = tun::create_as_async(&config)?;
-        Ok(device.into_framed().split())
+        info!("Created TUN device: {} with IP {}", self.tun_device_name, self.tun_ip_address);
+
+        let (writer, reader) = device.into_framed().split();
+        self.tun_writer = Some(writer);
+        self.tun_reader = Some(reader);
+
+        Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn tun_device_name(&self) -> String {
-        use libc::IF_NAMESIZE;
-        let name = self
-            .relay_name
-            .replace(|c: char| !c.is_ascii() || c.is_whitespace(), "-");
-        let name = format!("mob{}-{}", self.unique_index, name);
-        name[..name.len().min(IF_NAMESIZE - 1)].to_string()
-    }
-
-    #[cfg(target_os = "macos")]
-    fn tun_device_name(&self) -> String {
-        format!("utun{}", 99 + self.unique_index)
-    }
-
-    async fn setup_os_networking(&self) {
-        #[cfg(target_os = "linux")]
-        self.setup_linux_networking().await;
-    }
-
-    #[allow(dead_code)]
-    async fn setup_linux_networking(&self) {
-        let Some(streamer) = self.streamer.upgrade() else {
-            return;
-        };
-        let destination_address = &streamer.lock().await.destination_address;
-        let table = self.get_linux_networking_table();
-        self.teardown_linux_networking().await;
-        execute_command(
-            "ip",
-            &[
-                "route",
-                "add",
-                destination_address,
-                "dev",
-                &self.tun_device_name(),
-                "proto",
-                "kernel",
-                "scope",
-                "link",
-                "src",
-                &self.tun_ip_address,
-                "table",
-                &table,
-            ],
-        )
-        .await;
-        execute_command(
-            "ip",
-            &[
-                "route",
-                "add",
-                "default",
-                "via",
-                &self.tun_ip_address,
-                "dev",
-                &self.tun_device_name(),
-                "table",
-                &table,
-            ],
-        )
-        .await;
-        execute_command(
-            "ip",
-            &[
-                "rule",
-                "add",
-                "from",
-                &self.tun_ip_address,
-                "lookup",
-                &table,
-            ],
-        )
-        .await;
-    }
-
-    async fn teardown_os_networking(&self) {
-        #[cfg(target_os = "linux")]
-        self.teardown_linux_networking().await;
-    }
-
-    #[allow(dead_code)]
-    async fn teardown_linux_networking(&self) {
-        let table = self.get_linux_networking_table();
-        execute_command("ip", &["rule", "del", "lookup", &table]).await;
-        execute_command("ip", &["route", "flush", "table", &table]).await;
-    }
-
-    fn get_linux_networking_table(&self) -> String {
-        format!("{}", 300 + self.unique_index)
-    }
-
-    async fn start_tun_receiver(
+    async fn start_tun_forwarder(
         &mut self,
         mut tun_reader: TunReader,
         relay_socket: Arc<UdpSocket>,
-        tun_port_writer: Sender<u16>,
+        mut tun_port_writer: Sender<u16>,
     ) {
-        let Some(streamer) = self.streamer.upgrade() else {
-            return;
-        };
-        let streamer = streamer.lock().await;
-        let Ok(destination_address) = Ipv4Addr::from_str(&streamer.destination_address) else {
-            return;
-        };
+        let destination_address = self.destination_address.clone();
+
         self.tun_receiver = Some(tokio::spawn(async move {
-            let mut tun_port = 0u16;
+            let mut tun_port: u16 = 0u16;
+
             while let Some(packet) = tun_reader.next().await {
-                if let Err(error) = Self::handle_tun_packet(
-                    packet,
-                    &relay_socket,
-                    destination_address,
-                    &tun_port_writer,
-                    &mut tun_port,
-                )
-                .await
-                {
-                    error!("TUN receiver: {}", error);
-                    break;
+                match packet {
+                    Ok(data) => {
+                        if let Ok(ip_packet) = ip::Packet::new(data) {
+                            if let ip::Packet::V4(ip_packet) = ip_packet {
+                                if ip_packet.protocol() == ip::Protocol::Udp {
+                                    let dest_ip = ip_packet.destination();
+                                    if let Ok(dest_addr) = Ipv4Addr::from_str(&destination_address) {
+                                        if dest_ip == dest_addr {
+                                            if let Ok(udp_packet) = udp::Packet::new(ip_packet.payload()) {
+                                                let payload = udp_packet.payload().to_vec();
+
+                                                let new_tun_port = udp_packet.source();
+                                                if new_tun_port != tun_port {
+                                                    debug!("TUN port changed: {} -> {}", tun_port, new_tun_port);
+                                                    let _ = tun_port_writer.send(new_tun_port).await;
+                                                    tun_port = new_tun_port;
+                                                }
+
+                                                if let Err(error) = relay_socket.send(&payload).await {
+                                                    error!("Failed to forward packet: {}", error);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("TUN read error: {}", e);
+                        break;
+                    }
                 }
             }
         }));
     }
 
-    async fn handle_tun_packet(
-        packet: Result<Vec<u8>, std::io::Error>,
-        relay_socket: &Arc<UdpSocket>,
-        destination_address: Ipv4Addr,
-        tun_port_writer: &Sender<u16>,
-        tun_port: &mut u16,
-    ) -> Result<(), AnyError> {
-        match packet {
-            Ok(packet) => match ip::Packet::new(packet) {
-                Ok(ip::Packet::V4(packet)) => {
-                    if packet.protocol() == ip::Protocol::Udp
-                        && packet.destination() == destination_address
-                    {
-                        Self::handle_tun_udp_packet(
-                            packet.payload(),
-                            relay_socket,
-                            tun_port_writer,
-                            tun_port,
-                        )
-                        .await?;
-                    }
-                }
-                Ok(ip::Packet::V6(_)) => {
-                    debug!("TUN receiver: Discarding IPv6 packet");
-                }
-                Err(error) => {
-                    return Err(format!("Invalid IP packet: {}", error).into());
-                }
-            },
-            Err(error) => {
-                return Err(format!("TUN receiver: Read failed with: {}", error).into());
-            }
+    async fn start_tunnel(&mut self) -> Result<(), AnyError> {
+        if !self.identified {
+            info!("Not identified yet, waiting...");
+            return Ok(());
         }
-        Ok(())
-    }
 
-    async fn handle_tun_udp_packet(
-        packet: &[u8],
-        relay_socket: &Arc<UdpSocket>,
-        tun_port_writer: &Sender<u16>,
-        tun_port: &mut u16,
-    ) -> Result<(), AnyError> {
-        match udp::Packet::new(packet) {
-            Ok(packet) => {
-                let new_tun_port = packet.source();
-                if new_tun_port != *tun_port {
-                    tun_port_writer.send(new_tun_port).await.ok();
-                    *tun_port = new_tun_port;
-                }
-                if let Err(error) = relay_socket.send(packet.payload()).await {
-                    return Err(format!("Send error {}", error).into());
-                }
-            }
-            Err(error) => {
-                return Err(format!("Invalid UDP packet: {}", error).into());
-            }
-        }
-        Ok(())
+        info!("Starting tunnel to configured destination {}:{}", self.destination_address, self.destination_port);
+        let start_tunnel = StartTunnelRequest {
+            address: self.destination_address.clone(),
+            port: self.destination_port,
+        };
+        let request = MessageRequest {
+            id: 1,
+            data: MessageRequestData::StartTunnel(start_tunnel),
+        };
+        self.send(MessageToRelay::Request(request)).await
     }
 
     async fn start_relay_receiver(
@@ -526,24 +489,23 @@ impl Relay {
         mut tun_writer: TunWriter,
         mut tun_port_reader: Receiver<u16>,
     ) -> Result<(), AnyError> {
-        let Some(streamer) = self.streamer.upgrade() else {
-            return Err("No streamer".into());
-        };
-        let streamer = streamer.lock().await;
-        let destination_address = streamer.destination_address.clone();
-        let destination_port = streamer.destination_port;
         let tun_ip_address = self.tun_ip_address.clone();
+        let destination_address = self.destination_address.clone();
+        let destination_port = self.destination_port;
 
         self.relay_receiver = Some(tokio::spawn(async move {
-            let Ok(destination_address) = Ipv4Addr::from_str(&destination_address) else {
+            let Ok(tun_ip_addr) = Ipv4Addr::from_str(&tun_ip_address) else {
+                error!("Failed to parse TUN IP address: {}", tun_ip_address);
                 return;
             };
-            let Ok(tun_ip_address) = Ipv4Addr::from_str(&tun_ip_address) else {
+            let Ok(dest_ip) = Ipv4Addr::from_str(&destination_address) else {
+                error!("Failed to parse destination address: {}", destination_address);
                 return;
             };
+
             let mut buffer = vec![0; 2048];
-            let mut packet_builder =
-                PacketBuilder::new(destination_address, destination_port, tun_ip_address, 10000);
+            let mut packet_builder = PacketBuilder::new(dest_ip, destination_port, tun_ip_addr, 10000);
+
             loop {
                 if let Err(error) = select! {
                     result = relay_socket.recv(&mut buffer) => {
@@ -569,7 +531,7 @@ impl Relay {
     ) -> Result<(), AnyError> {
         match result {
             Ok(length) => {
-                debug!("Relay receiver: Got {:?}", &buffer[..length]);
+                debug!("Relay receiver: Got {} bytes", length);
                 let Ok(packet) = packet_builder.pack(&buffer[..length]) else {
                     return Err("Relay receiver: IP create error".into());
                 };
@@ -591,37 +553,16 @@ impl Relay {
             return Err("TUN port missing".into());
         };
         packet_builder.destination_port = tun_port;
-        info!("Relay receiver: Ready with {:?}", packet_builder);
+        info!("Relay receiver: Ready with port {}", tun_port);
         Ok(())
     }
 
     async fn start_handshake(&mut self) {
         self.challenge = random_string();
         self.salt = random_string();
+        info!("Starting handshake with challenge: {}", self.challenge);
         self.send_hello().await;
         self.identified = false;
-    }
-
-    async fn start_tunnel(
-        &mut self,
-        destination_address: &str,
-        destination_port: u16,
-    ) -> Result<(), AnyError> {
-        if !self.identified {
-            return Ok(());
-        }
-        if destination_address.is_empty() {
-            return Err("Destination address not available".into());
-        }
-        let start_tunnel = StartTunnelRequest {
-            address: destination_address.to_string(),
-            port: destination_port,
-        };
-        let request = MessageRequest {
-            id: 1,
-            data: MessageRequestData::StartTunnel(start_tunnel),
-        };
-        self.send(MessageToRelay::Request(request)).await
     }
 
     async fn send_hello(&mut self) {
@@ -632,11 +573,13 @@ impl Relay {
                 salt: self.salt.clone(),
             },
         });
+        info!("Sending Hello message");
         self.send(hello).await.ok();
     }
 
     async fn send(&mut self, message: MessageToRelay) -> Result<(), AnyError> {
         let text = serde_json::to_string(&message)?;
+        debug!("Sending message: {}", text);
         self.send_websocket(Message::Text(text.into())).await
     }
 
@@ -658,18 +601,12 @@ impl Relay {
 pub struct StreamerConfig {
     pub id: String,
     pub name: String,
-    /// Address the streamer's WebSocket server binds to.
     pub address: String,
-    /// Port the streamer's WebSocket server binds to.
     pub port: u16,
-    /// TUN device subnet in CIDR notation (e.g. `10.0.0.0/24`).
     pub tun_ip_network: String,
     pub password: String,
     pub destination_address: String,
     pub destination_port: u16,
-    /// Run in BELABOX mode, reading destinations from `belabox_config`.
-    pub belabox: bool,
-    pub belabox_config: PathBuf,
 }
 
 struct StreamerInner {
@@ -679,14 +616,12 @@ struct StreamerInner {
     address: String,
     port: u16,
     password: String,
-    destination_address: String,
-    destination_port: u16,
-    belabox: bool,
-    belabox_config: PathBuf,
     relays: Vec<Arc<Mutex<Relay>>>,
     unique_indexes: Vec<u32>,
     tun_ip_network: Ipv4Network,
     service_daemon: ServiceDaemon,
+    destination_address: String,
+    destination_port: u16,
 }
 
 impl StreamerInner {
@@ -702,27 +637,17 @@ impl StreamerInner {
                 address: config.address,
                 port: config.port,
                 password: config.password,
-                destination_address: config.destination_address,
-                destination_port: config.destination_port,
-                belabox: config.belabox,
-                belabox_config: config.belabox_config,
                 relays: Vec::new(),
                 unique_indexes: (1..tun_ip_network.size() - 1).rev().collect(),
                 tun_ip_network,
                 service_daemon: Self::create_service_daemon(),
+                destination_address: config.destination_address,
+                destination_port: config.destination_port,
             })
         }))
     }
 
     pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if self.belabox {
-            if let Err(error) = self.read_belaui_config_file().await {
-                error!("Read BELABOX config error: {}", error);
-            }
-            self.start_belaui_config_watcher();
-        } else {
-            self.destination_address = resolve_host(&self.destination_address).await?;
-        }
         self.start_relay_listener().await?;
         self.start_mdns_daemon();
         Ok(())
@@ -742,10 +667,12 @@ impl StreamerInner {
         let listener_address = format!("{}:{}", self.address, self.port);
         let listener = TcpListener::bind(&listener_address).await?;
         info!("WebSocket server listening on '{}'", listener_address);
+        info!("TUN devices will be created when relays connect");
         let streamer = self.me.clone();
 
         tokio::spawn(async move {
             while let Ok((tcp_stream, relay_address)) = listener.accept().await {
+                info!("New relay connection from: {}", relay_address);
                 match streamer.upgrade() {
                     Some(streamer) => {
                         streamer
@@ -764,66 +691,6 @@ impl StreamerInner {
         Ok(())
     }
 
-    fn start_belaui_config_watcher(&mut self) {
-        let (async_events_writer, mut async_events_reader) = tokio::sync::mpsc::channel(1);
-        let belabox_config = self.belabox_config.clone();
-        std::thread::spawn(move || {
-            let (events_writer, events_reader) =
-                std::sync::mpsc::channel::<notify::Result<notify::Event>>();
-            let Ok(mut watcher) = notify::recommended_watcher(events_writer) else {
-                error!("Failed to create watcher");
-                return;
-            };
-            if let Err(error) = watcher.watch(&belabox_config, notify::RecursiveMode::NonRecursive)
-            {
-                error!("Watch failed with error: {}", error);
-                return;
-            }
-            for result in events_reader {
-                if async_events_writer.blocking_send(result).is_err() {
-                    break;
-                }
-            }
-        });
-
-        let streamer = self.me.clone();
-        tokio::spawn(async move {
-            while let Some(result) = async_events_reader.recv().await {
-                match result {
-                    Ok(event) => {
-                        let EventKind::Access(AccessKind::Close(_)) = event.kind else {
-                            continue;
-                        };
-                        let Some(streamer) = streamer.upgrade() else {
-                            continue;
-                        };
-                        let mut streamer = streamer.lock().await;
-                        match streamer.read_belaui_config_file().await {
-                            Ok(true) => {
-                                for relay in &streamer.relays {
-                                    let mut relay = relay.lock().await;
-                                    relay.tunnel_destroyed().await;
-                                    relay
-                                        .start_tunnel(
-                                            &streamer.destination_address,
-                                            streamer.destination_port,
-                                        )
-                                        .await
-                                        .ok();
-                                }
-                            }
-                            Ok(false) => {}
-                            Err(error) => {
-                                error!("Read BELABOX config error: {}", error)
-                            }
-                        }
-                    }
-                    Err(error) => error!("Config error: {:?}", error),
-                }
-            }
-        });
-    }
-
     fn start_mdns_daemon(&mut self) {
         match self.create_mdns_service_info() {
             Ok(service_info) => {
@@ -835,23 +702,6 @@ impl StreamerInner {
                 error!("Failed to create mDNS service info with error: {}", error);
             }
         }
-    }
-
-    async fn read_belaui_config_file(&mut self) -> Result<bool, AnyError> {
-        let config = belaui::Config::new_from_file(&self.belabox_config).await?;
-        let mut destination_changed = false;
-        let address = resolve_host(&config.get_address()).await?;
-        if self.destination_address != address {
-            self.destination_address = address;
-            info!("New destination address {}", self.destination_address);
-            destination_changed = true;
-        }
-        if self.destination_port != config.get_port() {
-            self.destination_port = config.get_port();
-            info!("New destination port {}", self.destination_port);
-            destination_changed = true;
-        }
-        Ok(destination_changed)
     }
 
     fn create_mdns_service_info(&self) -> Result<ServiceInfo, AnyError> {
@@ -869,23 +719,50 @@ impl StreamerInner {
     }
 
     async fn handle_relay_connection(&mut self, tcp_stream: TcpStream, relay_address: SocketAddr) {
-        match tokio_tungstenite::accept_async(tcp_stream).await {
+        use http::header::{ORIGIN, SEC_WEBSOCKET_PROTOCOL, USER_AGENT};
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+        // Set the subprotocol that the Android relay expects
+        let callback = |req: &Request, response: Response| {
+            let mut response = response;
+            let headers = response.headers_mut();
+            headers.insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                http::HeaderValue::from_static("moblink"),
+            );
+            headers.insert(
+                ORIGIN,
+                http::HeaderValue::from_static("moblin://streamer"),
+            );
+            headers.insert(
+                USER_AGENT,
+                http::HeaderValue::from_static("Moblin/1.0"),
+            );
+            Ok(response)
+        };
+
+        match tokio_tungstenite::accept_hdr_async(tcp_stream, callback).await {
             Ok(websocket_stream) => {
                 info!("Relay connected: {}", relay_address);
                 let (writer, reader) = websocket_stream.split();
                 let Some(unique_index) = self.unique_indexes.pop() else {
+                    warn!("No unique index available for relay");
                     return;
                 };
                 let Some(tun_ip_address) = self.tun_ip_network.nth(unique_index) else {
+                    warn!("No TUN IP available for index: {}", unique_index);
                     self.unique_indexes.insert(0, unique_index);
                     return;
                 };
+                info!("Assigning TUN IP {} to relay", tun_ip_address);
                 let relay = Relay::new(
                     self.me.clone(),
                     relay_address,
                     writer,
                     tun_ip_address.to_string(),
                     unique_index,
+                    self.destination_address.clone(),
+                    self.destination_port,
                 );
                 relay.lock().await.start(reader);
                 self.add_relay(relay);
