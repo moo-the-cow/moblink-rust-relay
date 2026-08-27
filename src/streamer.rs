@@ -16,7 +16,6 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
@@ -420,7 +419,7 @@ impl Relay {
         &mut self,
         mut tun_reader: TunReader,
         relay_socket: Arc<UdpSocket>,
-        mut tun_port_writer: Sender<u16>,
+        tun_port_writer: Sender<u16>,
     ) {
         let destination_address = self.destination_address.clone();
 
@@ -722,7 +721,6 @@ impl StreamerInner {
         use http::header::{ORIGIN, SEC_WEBSOCKET_PROTOCOL, USER_AGENT};
         use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
-        // Set the subprotocol that the Android relay expects
         let callback = |req: &Request, response: Response| {
             let mut response = response;
             let headers = response.headers_mut();
