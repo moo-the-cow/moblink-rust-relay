@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::bytes::Bytes;
 use tokio_util::codec::Framed;
@@ -718,28 +719,11 @@ impl StreamerInner {
     }
 
     async fn handle_relay_connection(&mut self, tcp_stream: TcpStream, relay_address: SocketAddr) {
-        use http::header::{ORIGIN, SEC_WEBSOCKET_PROTOCOL, USER_AGENT};
-        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+        let mut config = WebSocketConfig::default();
+        config.max_message_size = Some(64 * 1024 * 1024);
+        config.max_frame_size = Some(16 * 1024 * 1024);
 
-        let callback = |req: &Request, response: Response| {
-            let mut response = response;
-            let headers = response.headers_mut();
-            headers.insert(
-                SEC_WEBSOCKET_PROTOCOL,
-                http::HeaderValue::from_static("moblink"),
-            );
-            headers.insert(
-                ORIGIN,
-                http::HeaderValue::from_static("moblin://streamer"),
-            );
-            headers.insert(
-                USER_AGENT,
-                http::HeaderValue::from_static("Moblin/1.0"),
-            );
-            Ok(response)
-        };
-
-        match tokio_tungstenite::accept_hdr_async(tcp_stream, callback).await {
+        match tokio_tungstenite::accept_async_with_config(tcp_stream, Some(config)).await {
             Ok(websocket_stream) => {
                 info!("Relay connected: {}", relay_address);
                 let (writer, reader) = websocket_stream.split();
