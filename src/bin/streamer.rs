@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
@@ -33,25 +32,16 @@ struct Args {
     websocket_server_port: u16,
 
     /// TUN IP network (CIDR notation).
-    /// TUN network interfaces will be assigned IP addresses from this network.
     #[arg(long, default_value = "10.3.3.0/24")]
     tun_ip_network: String,
 
-    /// Streaming destination address
+    /// Destination address (e.g., RIST receiver IP)
     #[arg(long)]
-    destination_address: Option<String>,
+    destination_address: String,
 
-    /// Streaming destination port
+    /// Destination port
     #[arg(long)]
-    destination_port: Option<u16>,
-
-    /// BELABOX mode
-    #[arg(long)]
-    belabox: bool,
-
-    /// Path to BELABOX config.json
-    #[arg(long, default_value = "/opt/belaUI/config.json")]
-    belabox_config: PathBuf,
+    destination_port: u16,
 
     /// Log level
     #[arg(long, default_value = "info")]
@@ -78,15 +68,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
     setup_logging(!args.no_log_timestamps, &args.log_level);
 
-    if !args.belabox {
-        if args.destination_address.is_none() {
-            return Err("--destination-address is required when --belabox is not given.".into());
-        }
-        if args.destination_port.is_none() {
-            return Err("--destination-port is required when --belabox is not given.".into());
-        }
-    }
-
     let streamer = streamer::Streamer::new(streamer::StreamerConfig {
         id: args.id,
         name: args.name,
@@ -94,10 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         port: args.websocket_server_port,
         tun_ip_network: args.tun_ip_network,
         password: args.password,
-        destination_address: args.destination_address.unwrap_or_default(),
-        destination_port: args.destination_port.unwrap_or_default(),
-        belabox: args.belabox,
-        belabox_config: args.belabox_config,
+        destination_address: args.destination_address,
+        destination_port: args.destination_port,
     })?;
     streamer.start().await?;
 
